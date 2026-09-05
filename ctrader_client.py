@@ -1,0 +1,488 @@
+"""
+ctrader_client.py
+------------------
+cTrader Open API bilan bevosita ishlaydigan YAGONA modul. Boshqa hech qaysi
+fayl (risk_manager.py, trade_manager.py, worker.py) to'g'ridan-to'g'ri
+tarmoq/protobuf bilan ishlamaydi — hammasi shu klass orqali o'tadi.
+
+Texnik asos: rasmiy `ctrader-open-api` (OpenApiPy) kutubxonasi, bu esa
+Twisted asinxron freymvorkiga qurilgan. Ulanish TCP+SSL orqali, xabarlar
+Protobuf formatida almashinadi (WebSocket emas, lekin printsip bir xil:
+doimiy ochiq ulanish, ikki tomonlama xabar almashinuvi).
+
+MUHIM: kutubxona versiyasiga qarab ba'zi Protobuf maydon nomlari va sinf
+joylashuvi biroz farq qilishi mumkin. Har bir chaqiruv joyida shu narsani
+paketning o'rnatilgan versiyasidagi `messages/OpenApiMessages_pb2.py`
+faylidan tekshirib tasdiqlash tavsiya etiladi (`pip show ctrader-open-api`
+bilan versiyani ko'rish, keyin fayl ichidan mos maydon nomini qidirish).
+
+XAVFSIZLIK PRINSIPLARI:
+  - Client ID/Secret va tokenlar FAQAT environment variables orqali keladi,
+    kodda hech qachon yozilmaydi.
+  - DEMO_MODE tekshiruvi bir necha joyda takrorlanadi ("defense in depth") —
+    hatto konfiguratsiya xatosi bo'lsa ham, tasodifan live hisobga
+    ulanib qolish ehtimoli kamaytiriladi.
+  - Har bir order yuborishdan oldin qaysi hisobga (demo/live) va qaysi
+    account ID'ga ulanilganini log qilib boradi — audit uchun.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import threading
+import time
+from dataclasses import dataclass
+from typing import Callable, Optional
+
+from ctrader_open_api import Client, EndPoints, Protobuf, TcpProtocol
+from ctrader_open_api.messages.OpenApiMessages_pb2 import (
+    ProtoOAAccountAuthReq,
+    ProtoOAAmendPositionSLTPReq,
+    ProtoOAApplicationAuthReq,
+    ProtoOAClosePositionReq,
+    ProtoOAErrorRes,
+    ProtoOAExecutionEvent,
+    ProtoOANewOrderReq,
+    ProtoOAReconcileReq,
+    ProtoOARefreshTokenReq,
+    ProtoOASpotEvent,
+    ProtoOASubscribeSpotsReq,
+    ProtoOASymbolByIdReq,
+    ProtoOASymbolsListReq,
+    ProtoOATraderReq,
+)
+from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
+    ProtoOAOrderType,
+    ProtoOATradeSide,
+)
+from twisted.internet import reactor
+
+logger = logging.getLogger("ctrader_client")
+
+
+class CTraderError(Exception):
+    """cTrader API xatoligi (masalan order rad etilganda) ko'tariladi."""
+
+
+@dataclass
+class SymbolInfo:
+    symbol_id: int
+    lot_size: int  # 1.0 lot necha "unit"ga teng (broker symbol ma'lumotidan)
+    pip_position: int
+    digits: int
+
+
+class CTraderClient:
+    """
+    Yagona, doim ochiq turadigan cTrader ulanishini boshqaradi.
+
+    Ishlatilishi (worker.py'da):
+        client = CTraderClient(...)
+        client.start()   # Twisted reactor'ni alohida thread'da ishga tushiradi
+        client.wait_until_ready(timeout=30)
+        client.send_market_order(...)
+    """
+
+    def __init__(
+        self,
+        client_id: str,
+        client_secret: str,
+        access_token: str,
+        account_id: int,
+        demo_mode: bool,
+        on_execution_event: Optional[Callable[[object], None]] = None,
+        on_error: Optional[Callable[[str], None]] = None,
+        on_spot_price: Optional[Callable[[int, float], None]] = None,
+    ):
+        if not client_id or not client_secret or not access_token:
+            raise ValueError(
+                "CTRADER_CLIENT_ID / CTRADER_CLIENT_SECRET / CTRADER_ACCESS_TOKEN "
+                "bo'sh bo'lishi mumkin emas"
+            )
+        if not account_id:
+            raise ValueError("CTRADER_ACCOUNT_ID sozlanmagan")
+
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._access_token = access_token
+        self._account_id = int(account_id)
+        self._demo_mode = demo_mode
+        self._on_execution_event = on_execution_event
+        self._on_error = on_error
+        self._on_spot_price = on_spot_price
+
+        host = EndPoints.PROTOBUF_DEMO_HOST if demo_mode else EndPoints.PROTOBUF_LIVE_HOST
+        port = EndPoints.PROTOBUF_PORT
+
+        logger.info(
+            "CTraderClient sozlandi: mode=%s host=%s account_id=%s",
+            "DEMO" if demo_mode else "LIVE",
+            host,
+            self._account_id,
+        )
+
+        self._client = Client(host, port, TcpProtocol)
+        self._client.setConnectedCallback(self._on_connected)
+        self._client.setDisconnectedCallback(self._on_disconnected)
+        self._client.setMessageReceivedCallback(self._on_message)
+
+        self._ready_event = threading.Event()
+        self._connected_event = threading.Event()
+        self._app_authenticated = False
+        self._account_authenticated = False
+
+        self._symbol_cache: dict[str, SymbolInfo] = {}
+        self._reactor_thread: Optional[threading.Thread] = None
+
+    # ------------------------------------------------------------------
+    # Ishga tushirish / to'xtatish
+    # ------------------------------------------------------------------
+    def start(self) -> None:
+        """Twisted reactor'ni alohida (daemon) thread'da ishga tushiradi."""
+
+        def _run():
+            self._client.startService()
+            reactor.run(installSignalHandlers=False)
+
+        self._reactor_thread = threading.Thread(
+            target=_run, name="ctrader-reactor", daemon=True
+        )
+        self._reactor_thread.start()
+        logger.info("cTrader reactor thread ishga tushirildi")
+
+    def wait_until_ready(self, timeout: float = 30.0) -> bool:
+        """Ulanish + ikkala autentifikatsiya tugaguncha kutadi."""
+        return self._ready_event.wait(timeout=timeout)
+
+    def is_ready(self) -> bool:
+        return self._ready_event.is_set()
+
+    # ------------------------------------------------------------------
+    # Twisted callback'lari
+    # ------------------------------------------------------------------
+    def _on_connected(self, client) -> None:
+        logger.info("cTrader serveriga TCP ulanish o'rnatildi, autentifikatsiya boshlanmoqda")
+        self._connected_event.set()
+        req = ProtoOAApplicationAuthReq()
+        req.clientId = self._client_id
+        req.clientSecret = self._client_secret
+        deferred = self._client.send(req)
+        deferred.addErrback(self._log_deferred_error, context="ApplicationAuth")
+
+    def _on_disconnected(self, client, reason) -> None:
+        logger.warning("cTrader ulanishi uzildi: %s. Qayta ulanishga harakat qilinadi.", reason)
+        self._ready_event.clear()
+        self._connected_event.clear()
+        self._app_authenticated = False
+        self._account_authenticated = False
+        if self._on_error:
+            self._on_error(f"Ulanish uzildi: {reason}")
+        # ctrader-open-api Client odatda o'zi qayta ulanishga harakat qiladi
+        # (ichki retry mexanizmi bilan). Qo'shimcha xavfsizlik uchun bu yerda
+        # aniq monitoring/alert yuborish tavsiya etiladi (worker.py darajasida).
+
+    def _on_message(self, client, message) -> None:
+        try:
+            extracted = Protobuf.extract(message)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Kelgan xabarni ochishda xato: %s", exc)
+            return
+
+        type_name = type(extracted).__name__
+
+        if type_name == "ProtoOAApplicationAuthRes":
+            logger.info("Ilova autentifikatsiyasi muvaffaqiyatli")
+            self._app_authenticated = True
+            self._authenticate_account()
+
+        elif type_name == "ProtoOAAccountAuthRes":
+            logger.info("Hisob autentifikatsiyasi muvaffaqiyatli: account_id=%s", self._account_id)
+            self._account_authenticated = True
+            self._ready_event.set()
+
+        elif type_name == "ProtoOAErrorRes" or isinstance(extracted, ProtoOAErrorRes):
+            error_code = getattr(extracted, "errorCode", "UNKNOWN")
+            description = getattr(extracted, "description", "")
+            logger.error("cTrader XATO: %s — %s", error_code, description)
+            if self._on_error:
+                self._on_error(f"{error_code}: {description}")
+
+        elif isinstance(extracted, ProtoOAExecutionEvent) or type_name == "ProtoOAExecutionEvent":
+            logger.info("Execution event keldi: %s", extracted)
+            if self._on_execution_event:
+                self._on_execution_event(extracted)
+
+        elif isinstance(extracted, ProtoOASpotEvent) or type_name == "ProtoOASpotEvent":
+            # cTrader narxlarni odatda "1e5 ga ko'paytirilgan butun son"
+            # ko'rinishida yuboradi (digits/pip_position'ga qarab). Aniq
+            # bo'linuvchini symbol ma'lumotidan (SymbolInfo.digits) olish
+            # kerak — worker.py shu konvertatsiyani bajaradi. Bu yerda xom
+            # qiymat o'zgarishsiz yuboriladi.
+            if self._on_spot_price and extracted.HasField("bid"):
+                self._on_spot_price(extracted.symbolId, extracted.bid)
+
+        else:
+            logger.debug("Boshqa xabar turi qabul qilindi: %s", type_name)
+
+    def _log_deferred_error(self, failure, context: str) -> None:
+        logger.error("cTrader so'rovida xato (%s): %s", context, failure)
+        if self._on_error:
+            self._on_error(f"{context}: {failure}")
+
+    def _authenticate_account(self) -> None:
+        req = ProtoOAAccountAuthReq()
+        req.ctidTraderAccountId = self._account_id
+        req.accessToken = self._access_token
+        deferred = self._client.send(req)
+        deferred.addErrback(self._log_deferred_error, context="AccountAuth")
+
+    # ------------------------------------------------------------------
+    # Token yangilash (access token muddati tugaganda)
+    # ------------------------------------------------------------------
+    def refresh_access_token(self, refresh_token: str) -> None:
+        """
+        Access token muddati tugaganda chaqiriladi. Yangi tokenni qaytarib,
+        chaqiruvchi kod uni environment/secret storage'da yangilashi kerak
+        (Render'da bu qo'lda environment variable orqali yoki alohida
+        secrets-store integratsiyasi orqali amalga oshiriladi).
+        """
+        req = ProtoOARefreshTokenReq()
+        req.refreshToken = refresh_token
+        deferred = self._client.send(req)
+        deferred.addErrback(self._log_deferred_error, context="RefreshToken")
+        logger.info("Token yangilash so'rovi yuborildi")
+
+    # ------------------------------------------------------------------
+    # Symbol ma'lumotini olish (lot_size, digits va h.k.)
+    # ------------------------------------------------------------------
+    def get_symbol_info(self, symbol_name: str) -> SymbolInfo:
+        """
+        DIQQAT: bu funksiya soddalashtirilgan sinxron "kutish" naqshidan
+        foydalanadi (threading.Event orqali). Ishlab chiqarish muhitida
+        symbol ma'lumotini FAQAT ishga tushishda bir marta olib, keshda
+        saqlash tavsiya etiladi (worker.py shunday qiladi).
+        """
+        if symbol_name in self._symbol_cache:
+            return self._symbol_cache[symbol_name]
+        raise CTraderError(
+            f"Symbol '{symbol_name}' keshda topilmadi. "
+            f"Worker ishga tushganda load_symbols() chaqirilganiga ishonch hosil qiling."
+        )
+
+    def load_symbols(self, symbol_names: list[str], timeout: float = 15.0) -> None:
+        """
+        Ishga tushishda bir marta chaqiriladi: barcha kerakli symbol'lar
+        ro'yxatini va ularning lot_size/digits ma'lumotini oladi.
+
+        ESLATMA: ProtoOASymbolsListReq -> ProtoOASymbolsListRes symbol nomi
+        va ID'sini beradi, lekin lotSize/pipPosition kabi to'liq ma'lumot
+        uchun har bir symbol ID bo'yicha ProtoOASymbolByIdReq yuborish kerak
+        bo'lishi mumkin (kutubxona versiyasiga qarab ProtoOALightSymbol
+        ba'zan lotSize'ni ham o'z ichiga oladi — o'rnatilgan versiyada
+        tekshiring). Quyidagi kod ikkala bosqichni ham amalga oshiradi.
+        """
+        done = threading.Event()
+        result: dict[str, SymbolInfo] = {}
+
+        def _on_symbols_list(extracted):
+            for sym in extracted.symbol:
+                if sym.symbolName in symbol_names:
+                    id_req = ProtoOASymbolByIdReq()
+                    id_req.ctidTraderAccountId = self._account_id
+                    id_req.symbolId.append(sym.symbolId)
+
+                    def _on_detail(detail_extracted, name=sym.symbolName, sid=sym.symbolId):
+                        if detail_extracted.symbol:
+                            detail = detail_extracted.symbol[0]
+                            result[name] = SymbolInfo(
+                                symbol_id=sid,
+                                lot_size=detail.lotSize,
+                                pip_position=detail.pipPosition,
+                                digits=detail.digits,
+                            )
+                            self._symbol_cache[name] = result[name]
+                            logger.info(
+                                "Symbol ma'lumoti yuklandi: %s -> %s", name, result[name]
+                            )
+                        if len(result) == len(symbol_names):
+                            done.set()
+
+                    reactor.callFromThread(self._send_and_await, id_req, _on_detail)
+
+        list_req = ProtoOASymbolsListReq()
+        list_req.ctidTraderAccountId = self._account_id
+        self._send_and_await(list_req, _on_symbols_list)
+
+        if not done.wait(timeout=timeout):
+            raise CTraderError(
+                f"Symbol ma'lumotlarini olish {timeout}s ichida tugallanmadi: "
+                f"{symbol_names}"
+            )
+
+    def _send_and_await(self, request, callback) -> None:
+        deferred = self._client.send(request)
+
+        def _on_success(response):
+            try:
+                extracted = Protobuf.extract(response)
+                callback(extracted)
+            except Exception:  # noqa: BLE001
+                logger.exception("Javobni qayta ishlashda xato")
+
+        deferred.addCallback(_on_success)
+        deferred.addErrback(self._log_deferred_error, context=type(request).__name__)
+
+    # ------------------------------------------------------------------
+    # Order yuborish
+    # ------------------------------------------------------------------
+    def send_market_order(
+        self,
+        symbol_id: int,
+        direction: str,  # "BUY" yoki "SELL"
+        volume_in_units: int,
+        sl_price: Optional[float] = None,
+        tp_price: Optional[float] = None,
+        label: str = "",
+        comment: str = "",
+    ):
+        """
+        Market order yuboradi, ixtiyoriy SL/TP bilan.
+
+        volume_in_units — cTrader API lotni emas, "unit" so'raydi
+        (masalan 0.01 lot XAUUSD uchun symbol.lotSize ga qarab hisoblanadi).
+        Bu konvertatsiya risk_manager/trade orchestration darajasida
+        (worker.py) amalga oshiriladi, chunki u symbol_info'ga bog'liq.
+
+        Qaytaradi: Twisted Deferred — chaqiruvchi kod .addCallback/.addErrback
+        bilan natijani kuzatishi mumkin.
+        """
+        req = ProtoOANewOrderReq()
+        req.ctidTraderAccountId = self._account_id
+        req.symbolId = symbol_id
+        req.orderType = ProtoOAOrderType.MARKET
+        req.tradeSide = (
+            ProtoOATradeSide.BUY if direction.upper() == "BUY" else ProtoOATradeSide.SELL
+        )
+        req.volume = volume_in_units
+
+        if sl_price is not None:
+            req.stopLoss = sl_price
+        if tp_price is not None:
+            req.takeProfit = tp_price
+        if label:
+            req.label = label
+        if comment:
+            req.comment = comment
+
+        logger.info(
+            "ORDER YUBORILMOQDA: %s symbol_id=%s volume=%s SL=%s TP=%s label=%s",
+            direction,
+            symbol_id,
+            volume_in_units,
+            sl_price,
+            tp_price,
+            label,
+        )
+
+        deferred = self._client.send(req)
+        deferred.addErrback(self._log_deferred_error, context="NewOrder")
+        return deferred
+
+    def amend_position_sl_tp(
+        self,
+        position_id: int,
+        sl_price: Optional[float] = None,
+        tp_price: Optional[float] = None,
+    ):
+        """Ochiq pozitsiyaning SL va/yoki TP narxini yangilaydi (trailing uchun)."""
+        req = ProtoOAAmendPositionSLTPReq()
+        req.ctidTraderAccountId = self._account_id
+        req.positionId = position_id
+        if sl_price is not None:
+            req.stopLoss = sl_price
+        if tp_price is not None:
+            req.takeProfit = tp_price
+
+        logger.info(
+            "SL/TP YANGILANMOQDA: position_id=%s SL=%s TP=%s",
+            position_id,
+            sl_price,
+            tp_price,
+        )
+
+        deferred = self._client.send(req)
+        deferred.addErrback(self._log_deferred_error, context="AmendSLTP")
+        return deferred
+
+    def close_position(self, position_id: int, volume_in_units: int):
+        """Pozitsiyani to'liq (yoki qisman, volume orqali) yopadi."""
+        req = ProtoOAClosePositionReq()
+        req.ctidTraderAccountId = self._account_id
+        req.positionId = position_id
+        req.volume = volume_in_units
+
+        logger.info("POZITSIYA YOPILMOQDA: position_id=%s volume=%s", position_id, volume_in_units)
+
+        deferred = self._client.send(req)
+        deferred.addErrback(self._log_deferred_error, context="ClosePosition")
+        return deferred
+
+    def get_account_balance(self, timeout: float = 10.0) -> float:
+        """
+        Joriy hisob balansini so'raydi va sinxron tarzda qaytaradi.
+        DIQQAT: balans odatda cTrader API'da "centa/kopeyka"ga o'xshash
+        eng kichik birlikda keladi (masalan moneyDigits ga qarab, ko'pincha
+        real qiymat = balance / 100). Aniq bo'linuvchini trader javobidagi
+        `moneyDigits` maydonidan olish tavsiya etiladi — worker.py buni
+        hisobga oladi.
+        """
+        done = threading.Event()
+        result: dict[str, float] = {}
+
+        def _on_trader(extracted):
+            trader = extracted.trader
+            money_digits = getattr(trader, "moneyDigits", 2)
+            divisor = 10 ** money_digits
+            result["balance"] = trader.balance / divisor
+            done.set()
+
+        req = ProtoOATraderReq()
+        req.ctidTraderAccountId = self._account_id
+        self._send_and_await(req, _on_trader)
+
+        if not done.wait(timeout=timeout):
+            raise CTraderError("Balansni olish uchun javob kelmadi (timeout)")
+
+        return result["balance"]
+
+    def subscribe_spots(self, symbol_ids: list[int]) -> None:
+        """
+        Berilgan symbol'lar uchun jonli narx oqimiga obuna bo'ladi. Har bir
+        yangi narx kelganda konstruktordagi `on_spot_price(symbol_id, bid)`
+        chaqiriladi. Trailing tekshiruvi buni ishlatishi mumkin, lekin
+        boshlang'ich versiyada worker.py 1-daqiqalik pollingni ustun
+        qo'yadi (soddalik uchun) — bu obuna kelajakda tezroq reaktsiya
+        kerak bo'lsa ishlatilishi uchun tayyorlab qo'yilgan.
+        """
+        req = ProtoOASubscribeSpotsReq()
+        req.ctidTraderAccountId = self._account_id
+        for sid in symbol_ids:
+            req.symbolId.append(sid)
+        deferred = self._client.send(req)
+        deferred.addErrback(self._log_deferred_error, context="SubscribeSpots")
+        logger.info("Narx oqimiga obuna yuborildi: %s", symbol_ids)
+
+    def reconcile_open_positions(self):
+        """
+        Hozir broker'da ochiq turgan barcha pozitsiyalar ro'yxatini so'raydi.
+        Worker qayta ishga tushganda (deploy/restart) xotiradagi holatni
+        broker bilan MOSLASHTIRISH uchun ishlatiladi — bu juda muhim,
+        aks holda restart'dan keyin bot "esidan chiqargan" pozitsiyalarni
+        boshqarishni to'xtatib qo'yishi mumkin.
+        """
+        req = ProtoOAReconcileReq()
+        req.ctidTraderAccountId = self._account_id
+        deferred = self._client.send(req)
+        deferred.addErrback(self._log_deferred_error, context="Reconcile")
+        return deferred
