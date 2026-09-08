@@ -250,10 +250,22 @@ def handle_new_signal(payload: dict) -> dict:
             from ctrader_open_api import Protobuf
 
             extracted = Protobuf.extract(response)
-            position_id = getattr(extracted, "positionId", None)
-            if position_id is None and hasattr(extracted, "order"):
-                position_id = getattr(extracted.order, "positionId", None)
+            # Turli javob tuzilmalarida positionId turli joyda bo'lishi
+            # mumkin (ExecutionEvent'ning versiyasiga qarab). Barcha
+            # mumkin bo'lgan joylarni tekshirib, birinchi NOL BO'LMAGAN
+            # (haqiqiy) qiymatni olamiz — proto3'da 0 "o'rnatilmagan"
+            # degani, shuning uchun 0'ni haqiqiy ID sifatida qabul qilmaymiz.
+            candidates = []
+            if hasattr(extracted, "position") and extracted.HasField("position"):
+                candidates.append(getattr(extracted.position, "positionId", 0))
+            if hasattr(extracted, "order") and extracted.HasField("order"):
+                candidates.append(getattr(extracted.order, "positionId", 0))
+            top_level = getattr(extracted, "positionId", 0)
+            candidates.append(top_level)
+
+            position_id = next((c for c in candidates if c), None)
             result_holder["position_id"] = position_id
+            result_holder["raw_response"] = str(extracted)
         except Exception:  # noqa: BLE001
             logger.exception("Order javobini o'qishda xato")
         finally:
@@ -276,8 +288,9 @@ def handle_new_signal(payload: dict) -> dict:
     position_id = result_holder.get("position_id")
     if position_id is None:
         logger.error(
-            "Order yuborildi, lekin position_id javobda topilmadi — "
-            "reconcile_open_positions() orqali qo'lda tekshirish tavsiya etiladi"
+            "Order yuborildi, lekin position_id javobda topilmadi. Xom javob: %s "
+            "— reconcile_open_positions() orqali qo'lda tekshirish tavsiya etiladi",
+            result_holder.get("raw_response", "(yo'q)"),
         )
         return {
             "status": "error",
