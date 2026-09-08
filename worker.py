@@ -202,11 +202,14 @@ def handle_new_signal(payload: dict) -> dict:
     if direction not in ("BUY", "SELL"):
         return {"status": "error", "detail": f"Noma'lum direction: {direction}"}
 
-    # pip_value_per_lot: XAUUSD uchun 1.0 lot = symbol_info.lot_size unit
-    # (odatda 100 oz), narx $1 harakat qilsa 1 lot = $lot_size zarar/foyda.
-    # BU QIYMATNI SANDBOX/DEMO'DA BITTA KICHIK TEST ORDER BILAN TASDIQLASH
-    # SHART — broker'ga qarab farq qilishi mumkin.
-    pip_value_per_lot = float(_symbol_info.lot_size)
+    # pip_value_per_lot: XAUUSD uchun 1.0 lot = 100 untsiya (broker odatiy
+    # standarti). symbol_info.lot_size (masalan 10000) — bu cTrader'ning
+    # VOLUME MAYDONI uchun ICHKI MASSHTABLANGAN birligi (0.01 lot->100 unit
+    # yuborish uchun ishlatiladi, bu TO'G'RI), lekin haqiqiy $ hisob-kitobida
+    # ishlatib bo'lmaydi — shuning uchun 100'ga bo'linadi (cTrader har doim
+    # shu birlikni 100x masshtabda beradi). BU QIYMATNI HAQIQIY TEST ORDER
+    # BILAN QAYTA TASDIQLASH TAVSIYA ETILADI.
+    pip_value_per_lot = float(_symbol_info.lot_size) / 100.0
 
     try:
         balance = client.get_account_balance(timeout=10)
