@@ -211,6 +211,18 @@ def handle_new_signal(payload: dict) -> dict:
     # BILAN QAYTA TASDIQLASH TAVSIYA ETILADI.
     pip_value_per_lot = float(_symbol_info.lot_size) / 100.0
 
+    # Broker faqat symbol.digits (XAUUSD uchun odatda 2) gacha o'nlik xona
+    # qabul qiladi — Python hisob-kitoblaridan kelgan uzun o'nlik sonlarni
+    # (masalan 4388.451850000003) yaxlitlab yuborish SHART, aks holda
+    # broker "INVALID_REQUEST" bilan rad etadi.
+    digits = _symbol_info.digits
+    sl_price = round(sl_price, digits)
+    tp2 = round(tp2, digits)
+    tp3 = round(tp3, digits)
+    tp5 = round(tp5, digits)
+    tp10 = round(tp10, digits)
+    tp15 = round(tp15, digits)
+
     try:
         balance = client.get_account_balance(timeout=10)
     except CTraderError as exc:
@@ -392,6 +404,11 @@ def _run_trailing_check_once() -> None:
                     )
 
         if new_sl is not None or new_tp is not None:
+            digits = _symbol_info.digits if _symbol_info else 2
+            if new_sl is not None:
+                new_sl = round(new_sl, digits)
+            if new_tp is not None:
+                new_tp = round(new_tp, digits)
             client.amend_position_sl_tp(
                 position_id=pos.position_id,
                 sl_price=new_sl,
