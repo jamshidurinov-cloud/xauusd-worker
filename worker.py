@@ -405,21 +405,28 @@ def _run_trailing_check_once() -> None:
 
         if new_sl is not None or new_tp is not None:
             digits = _symbol_info.digits if _symbol_info else 2
-            if new_sl is not None:
-                new_sl = round(new_sl, digits)
-            if new_tp is not None:
-                new_tp = round(new_tp, digits)
+
+            # MUHIM: cTrader amend so'rovi TO'LIQ holatni kutadi — agar
+            # faqat o'zgargan maydon (masalan SL) yuborilib, TP jo'natilmasa,
+            # broker buni "TP'ni OLIB TASHLA" deb tushunishi mumkin. Shuning
+            # uchun har doim IKKALASINI HAM (joriy holat asosida) birga
+            # yuboramiz — hech qachon faqat bittasini emas.
+            final_sl = new_sl if new_sl is not None else pos.current_sl
+            final_tp = new_tp if new_tp is not None else pos.current_tp
+            final_sl = round(final_sl, digits) if final_sl is not None else None
+            final_tp = round(final_tp, digits) if final_tp is not None else None
+
             client.amend_position_sl_tp(
                 position_id=pos.position_id,
-                sl_price=new_sl,
-                tp_price=new_tp,
+                sl_price=final_sl,
+                tp_price=final_tp,
             )
             logger.info(
                 "TRAILING AMALGA OSHIRILDI: pos=%s sabab=%s SL=%s TP=%s",
                 pos.position_id,
                 action.reason,
-                new_sl,
-                new_tp,
+                final_sl,
+                final_tp,
             )
 
 
