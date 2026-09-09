@@ -40,7 +40,6 @@ from flask import Flask, jsonify, request
 from ctrader_client import CTraderClient, CTraderError, SymbolInfo
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOAPositionStatus
 from risk_manager import RiskConfig, RiskManager, SignalRejected
-from swing_detector import get_trailing_swing_sl
 from trade_manager import ManagedPosition, TradeManager, TradeSide
 
 # ----------------------------------------------------------------------
@@ -84,7 +83,6 @@ CTRADER_ACCOUNT_ID = int(_require_env("CTRADER_ACCOUNT_ID"))
 DEMO_MODE = _parse_demo_mode()
 
 SYMBOL_NAME = os.environ.get("SYMBOL_NAME", "XAUUSD")
-TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY", "")  # swing_detector uchun
 
 RISK_CONFIG = RiskConfig(
     risk_percent=float(os.environ.get("RISK_PERCENT", "1.0")),
@@ -447,34 +445,11 @@ def _run_trailing_check_once() -> None:
         if action is None:
             continue
 
+        # SL/TP endi to'liq trade_manager.evaluate() ichida, mavjud TP
+        # darajalariga asoslanib hisoblanadi (tashqi swing-hisoblash
+        # kerak emas — ishonchli va oldindan aniq).
         new_sl = action.new_sl
         new_tp = action.new_tp
-
-        # Agar SL="swing" bo'lishi kerak bo'lsa (TP3/TP5/TP10 checkpoint'lari),
-        # swing_detector orqali mustaqil hisoblanadi.
-        if action.reason in (
-            "TP3_REACHED_TP_TO_TP10",
-            "TP5_REACHED_TP_TO_TP15",
-            "TP10_REACHED_SL_TO_SWING",
-        ):
-            if not TWELVEDATA_API_KEY:
-                logger.warning(
-                    "TWELVEDATA_API_KEY sozlanmagan — swing SL hisoblab bo'lmadi, "
-                    "faqat TP o'zgartiriladi, SL o'sha holicha qoladi (xavfsiz default)."
-                )
-            else:
-                swing_sl = get_trailing_swing_sl(
-                    api_key=TWELVEDATA_API_KEY,
-                    direction=pos.side.value,
-                )
-                if swing_sl is not None:
-                    new_sl = swing_sl
-                    trade_manager.apply_swing_sl(pos.position_id, swing_sl)
-                else:
-                    logger.warning(
-                        "Pozitsiya %s uchun swing SL topilmadi — SL o'zgartirilmaydi",
-                        pos.position_id,
-                    )
 
         if new_sl is not None or new_tp is not None:
             digits = _symbol_info.digits if _symbol_info else 2
