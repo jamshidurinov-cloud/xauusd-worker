@@ -58,6 +58,14 @@ class ManagedPosition:
     current_sl: float = field(init=False)
     current_tp: float = field(init=False)
 
+    # Worker qayta ishga tushganda broker'dan "eng yaqin holatda" tiklangan
+    # pozitsiyalar uchun False bo'ladi — chunki asl TP2-TP15 checkpoint'lari
+    # (faqat signal payload'ida bo'lgan, broker'da saqlanmaydigan) yo'qolgan.
+    # Noto'g'ri taxmin qilib SL'ni xato joyga surishdan ko'ra, bunday
+    # pozitsiyalar uchun TP-checkpoint trailing butunlay TO'XTATILADI —
+    # faqat kuzatuv (yopilishni aniqlash) va risk-hisob davom etadi.
+    trailing_enabled: bool = True
+
     # Qaysi checkpoint'lar allaqachon "ishga tushirilgan" (idempotentlik
     # uchun — bir checkpoint ikki marta qayta ishlanmasligi kerak)
     tp2_triggered: bool = False
@@ -147,6 +155,11 @@ class TradeManager:
             pos = self._positions.get(position_id)
             if pos is None:
                 logger.warning("evaluate() noma'lum position_id uchun chaqirildi: %s", position_id)
+                return None
+
+            if not pos.trailing_enabled:
+                # Tiklangan (orphan) pozitsiya — checkpoint'lari noma'lum,
+                # shuning uchun trailing amalga oshirilmaydi (xavfsizlik).
                 return None
 
             # Eng "uzoq" checkpoint'dan boshlab tekshiramiz, shunda narx
