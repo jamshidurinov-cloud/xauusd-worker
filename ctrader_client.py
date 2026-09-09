@@ -474,6 +474,45 @@ class CTraderClient:
         deferred.addErrback(self._log_deferred_error, context="SubscribeSpots")
         logger.info("Narx oqimiga obuna yuborildi: %s", symbol_ids)
 
+    def get_open_positions_full(self, timeout: float = 10.0) -> list:
+        """
+        Broker'dagi barcha ochiq pozitsiyalar haqida TO'LIQ ma'lumot
+        (position_id, symbol_id, side, volume, entry narxi, joriy SL/TP)
+        qaytaradi. Worker qayta ishga tushganda (deploy/restart), xotirada
+        yo'qolgan, lekin broker'da hali ochiq turgan pozitsiyalarni
+        "eng yaqin holatda" tiklash uchun ishlatiladi.
+        """
+        done = threading.Event()
+        result: dict = {}
+
+        def _on_reconcile(extracted):
+            positions = []
+            for pos in extracted.position:
+                if pos.positionStatus != ProtoOAPositionStatus.POSITION_STATUS_OPEN:
+                    continue
+                positions.append(
+                    {
+                        "position_id": pos.positionId,
+                        "symbol_id": pos.tradeData.symbolId,
+                        "side": "BUY" if pos.tradeData.tradeSide == ProtoOATradeSide.BUY else "SELL",
+                        "volume_units": pos.tradeData.volume,
+                        "entry_price": pos.price,
+                        "current_sl": pos.stopLoss if pos.HasField("stopLoss") else None,
+                        "current_tp": pos.takeProfit if pos.HasField("takeProfit") else None,
+                    }
+                )
+            result["positions"] = positions
+            done.set()
+
+        req = ProtoOAReconcileReq()
+        req.ctidTraderAccountId = self._account_id
+        self._send_and_await(req, _on_reconcile)
+
+        if not done.wait(timeout=timeout):
+            raise CTraderError("Reconcile (to'liq) javobi kelmadi (timeout)")
+
+        return result["positions"]
+
     def get_open_position_ids(self, timeout: float = 10.0) -> set:
         """
         Broker'da HOZIR haqiqatan ham ochiq turgan pozitsiyalar ID'lari
