@@ -38,6 +38,7 @@ from typing import Optional
 from flask import Flask, jsonify, request
 
 from ctrader_client import CTraderClient, CTraderError, SymbolInfo
+from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOAPositionStatus
 from risk_manager import RiskConfig, RiskManager, SignalRejected
 from swing_detector import get_trailing_swing_sl
 from trade_manager import ManagedPosition, TradeManager, TradeSide
@@ -131,11 +132,25 @@ def _on_ctrader_error(message: str) -> None:
 
 def _on_execution_event(event) -> None:
     logger.info("Execution event qabul qilindi: %s", event)
-    # TODO: order to'liq bajarilgach kelgan position_id'ni ManagedPosition'ga
-    # bog'lash, yoki SL urilib pozitsiya yopilganda trade_manager/risk_manager
-    # holatini tozalash shu yerda amalga oshiriladi. Aniq maydon nomlari
-    # (masalan event.order.positionId, event.executionType) o'rnatilgan
-    # kutubxona versiyasidan tasdiqlanishi kerak.
+    # 1-QATLAM: pozitsiya broker tomonidan yopilganini REAL-VAQTDA aniqlash
+    # (SL/TP urilgani, qo'lda yopilgani va h.k.) — aniqlangan zahoti
+    # xotiradan (trade_manager) va risk hisobidan (risk_manager) olib
+    # tashlanadi, shunda keyingi signallar noto'g'ri "jami risk to'lgan"
+    # deb rad etilmaydi.
+    try:
+        if event.HasField("position") and event.position.positionStatus == ProtoOAPositionStatus.POSITION_STATUS_CLOSED:
+            pid = event.position.positionId
+            still_tracked = any(p.position_id == pid for p in trade_manager.get_all_positions())
+            if still_tracked:
+                trade_manager.remove_position(pid)
+                risk_manager.unregister_position(str(pid))
+                logger.info(
+                    "Pozitsiya %s YOPILGANI ANIQLANDI (execution event orqali) — "
+                    "kuzatuvdan va risk hisobidan olib tashlandi",
+                    pid,
+                )
+    except Exception:  # noqa: BLE001
+        logger.exception("Execution event orqali yopiq pozitsiyani aniqlashda xato")
 
 
 client = CTraderClient(
@@ -352,12 +367,70 @@ def _get_current_price(symbol_id: int) -> Optional[float]:
 
 def trailing_loop(interval_seconds: int = 60) -> None:
     logger.info("Trailing sikli ishga tushdi (har %s soniyada)", interval_seconds)
+    RECONCILE_EVERY_N_CYCLES = 5  # taxminan har 5 daqiqada bir (5 x 60s)
+    cycle_count = 0
     while True:
         try:
             _run_trailing_check_once()
+            cycle_count += 1
+            if cycle_count >= RECONCILE_EVERY_N_CYCLES:
+                cycle_count = 0
+                _reconcile_positions_with_broker()
         except Exception:  # noqa: BLE001
             logger.exception("Trailing tekshiruvida kutilmagan xato")
         time.sleep(interval_seconds)
+
+
+def _reconcile_positions_with_broker() -> None:
+    """
+    2-QATLAM (xavfsizlik to'ri): execution event orqali 1-qatlam biror
+    sababdan (masalan qisqa tarmoq uzilishi, Worker restart) pozitsiya
+    yopilganini "eshitib qolmagan" bo'lsa ham, bu davriy tekshiruv
+    xotiradagi holatni broker'ning haqiqiy holati bilan solishtirib,
+    allaqachon yopilgan pozitsiyalarni kuzatuvdan tozalaydi.
+    """
+    try:
+        broker_open_ids = client.get_open_position_ids(timeout=10)
+    except CTraderError as exc:
+        logger.warning("Reconcile: broker'dan ochiq pozitsiyalar ro'yxati olinmadi: %s", exc)
+        return
+
+    for pos in trade_manager.get_all_positions():
+        if pos.position_id not in broker_open_ids:
+            logger.warning(
+                "RECONCILE: pozitsiya %s xotirada 'ochiq' turibdi, lekin broker'da "
+                "endi yo'q — kuzatuvdan va risk hisobidan olib tashlanmoqda",
+                pos.position_id,
+            )
+            trade_manager.remove_position(pos.position_id)
+            risk_manager.unregister_position(str(pos.position_id))
+
+
+def _compute_dynamic_risk_percent(pos, current_sl: float) -> float:
+    """
+    Pozitsiyaning INITIAL risk%'ini SL harakatiga qarab qayta hisoblaydi.
+
+    Mantiq: risk% — SL masofasiga chiziqli bog'liq (lot hajmi o'zgarmagani
+    uchun). Agar SL entry narxidan "xavfsiz" tomonga o'tgan bo'lsa (BUY uchun
+    SL >= entry, SELL uchun SL <= entry) — bu pozitsiya ENDI ZARAR KELTIRA
+    OLMAYDI, demak uning risk%i 0 bo'lishi kerak (yangi savdolar uchun to'liq
+    "joy" bo'shatiladi). Aks holda, joriy SL masofasi boshlang'ich SL
+    masofasiga nisbatan qanday ulushni tashkil etsa, risk% ham shunga mos
+    kichraytiriladi.
+    """
+    if pos.side == TradeSide.BUY:
+        current_distance = max(pos.entry_price - current_sl, 0.0)
+    else:
+        current_distance = max(current_sl - pos.entry_price, 0.0)
+
+    initial_distance = abs(pos.entry_price - pos.initial_sl)
+    if initial_distance <= 0:
+        return 0.0
+
+    dynamic_risk = pos.risk_percent * (current_distance / initial_distance)
+    # Xavfsizlik: SL bizning qoidamizga ko'ra hech qachon zararni
+    # oshirmasligi kerak, lekin ehtiyot uchun yuqori chegara bilan cheklaymiz.
+    return min(dynamic_risk, pos.risk_percent)
 
 
 def _run_trailing_check_once() -> None:
@@ -428,6 +501,14 @@ def _run_trailing_check_once() -> None:
                 final_sl,
                 final_tp,
             )
+
+            # SL o'zgargan bo'lsa (bu safar aynan shu tekshiruvda), risk-modul
+            # dagi "band qilingan" risk%ni ham qayta hisoblaymiz — SL
+            # foyda/breakeven tomon surilgan bo'lsa, kelasi signal(lar) uchun
+            # jami risk chegarasidan avtomatik "joy bo'shaydi".
+            if new_sl is not None:
+                dynamic_risk = _compute_dynamic_risk_percent(pos, final_sl)
+                risk_manager.update_position_risk(str(pos.position_id), dynamic_risk)
 
 
 # ----------------------------------------------------------------------
