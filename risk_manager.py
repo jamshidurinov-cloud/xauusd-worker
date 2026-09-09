@@ -140,6 +140,35 @@ class RiskManager:
                     self.total_open_risk_percent(),
                 )
 
+    def update_position_risk(self, position_id: str, new_risk_percent: float) -> None:
+        """
+        Pozitsiyaning SL'i harakatlanganda (masalan breakeven'ga yoki
+        foydaga o'tganda), uning "band qilingan" risk foizini YANGILAYDI.
+
+        MUHIM: bu funksiya risk%ni FAQAT kamaytirish uchun ishlatiladi
+        (SL har doim foyda tomon suriladi, hech qachon zararni oshirmaydi —
+        bu bizning trailing qoidamizning o'zidan kelib chiqadi). Shunga
+        qaramay, xavfsizlik uchun yangi qiymat manfiy bo'lmasligi
+        tekshiriladi (0 dan kichik bo'lsa 0'ga tenglashtiriladi).
+        """
+        with self._lock:
+            pos = self._open_positions.get(position_id)
+            if pos is None:
+                logger.warning(
+                    "update_position_risk: noma'lum position_id: %s", position_id
+                )
+                return
+            old_risk = pos.risk_percent
+            pos.risk_percent = max(new_risk_percent, 0.0)
+            logger.info(
+                "Pozitsiya %s risk%% yangilandi: %.2f%% -> %.2f%% "
+                "(jami ochiq risk endi %.2f%%)",
+                position_id,
+                old_risk,
+                pos.risk_percent,
+                self.total_open_risk_percent(),
+            )
+
     def total_open_risk_percent(self) -> float:
         with self._lock:
             return sum(p.risk_percent for p in self._open_positions.values())
