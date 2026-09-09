@@ -180,7 +180,109 @@ def initialize_ctrader() -> None:
     logger.info("Symbol ma'lumoti tayyor: %s", _symbol_info)
 
     client.subscribe_spots([_symbol_info.symbol_id])
-    client.reconcile_open_positions()
+    _recover_orphan_positions()
+
+
+def _recover_orphan_positions() -> None:
+    """
+    Worker ishga tushganda (deploy/restart'dan keyin) broker'da hali ochiq
+    turgan, lekin xotirada "yo'qolgan" pozitsiyalarni topib, KUZATUVGA
+    QAYTA QO'SHADI — faqat risk-hisob va yopilishni aniqlash uchun.
+
+    MUHIM CHEKLOV (ataylab, xavfsizlik uchun): bunday pozitsiyalar uchun
+    TP-checkpoint asosidagi SL trailing ISHLAMAYDI, chunki asl TP2-TP15
+    darajalari (faqat signal payload'ida bo'lgan) qayta tiklab bo'lmaydi.
+    Buni taxmin qilish SL'ni noto'g'ri joyga surib qo'yish xavfini
+    tug'diradi — shuning uchun "hech narsa qilmaslik" (faqat kuzatish)
+    "noto'g'ri taxmin qilish"dan XAVFSIZROQ deb hisoblanadi.
+    """
+    if _symbol_info is None:
+        return
+
+    try:
+        broker_positions = client.get_open_positions_full(timeout=10)
+    except CTraderError as exc:
+        logger.warning(
+            "Ishga tushishda broker pozitsiyalarini olib bo'lmadi (keyinroq "
+            "reconcile sikli qayta urinadi): %s",
+            exc,
+        )
+        return
+
+    already_tracked_ids = {p.position_id for p in trade_manager.get_all_positions()}
+
+    for bp in broker_positions:
+        if bp["symbol_id"] != _symbol_info.symbol_id:
+            continue  # faqat bizning symbolimiz (XAUUSD) bilan ishlaymiz
+        if bp["position_id"] in already_tracked_ids:
+            continue
+
+        entry_price = bp["entry_price"]
+        current_sl = bp["current_sl"]
+        current_tp = bp["current_tp"]
+
+        if current_sl is None:
+            logger.warning(
+                "Pozitsiya %s broker'da SL'siz topildi — xavfsizlik uchun "
+                "tiklanmaydi, qo'lda tekshirish tavsiya etiladi (cTrader "
+                "terminalida)",
+                bp["position_id"],
+            )
+            continue
+
+        side_enum = TradeSide.BUY if bp["side"] == "BUY" else TradeSide.SELL
+
+        # tp2..tp15 uchun aniq qiymat yo'q — barchasiga joriy TP qo'yamiz.
+        # Bu qiymatlar ishlatilmaydi ham (trailing_enabled=False bo'lgani
+        # uchun evaluate() darhol None qaytaradi), shunchaki dataclass
+        # maydonini to'ldirish uchun.
+        placeholder_tp = current_tp if current_tp is not None else entry_price
+
+        managed = ManagedPosition(
+            position_id=bp["position_id"],
+            event_key=f"recovered-{bp['position_id']}",
+            side=side_enum,
+            entry_price=entry_price,
+            initial_sl=current_sl,
+            tp2=placeholder_tp,
+            tp3=placeholder_tp,
+            tp5=placeholder_tp,
+            tp10=placeholder_tp,
+            tp15=placeholder_tp,
+            volume_units=bp["volume_units"],
+            risk_percent=0.0,  # pastda dinamik hisoblanadi
+            trailing_enabled=False,
+        )
+        trade_manager.add_position(managed)
+
+        # Risk% ni joriy SL masofasidan hisoblaymiz (bu — haqiqiy joriy
+        # xavf, "boshlang'ich" emas, chunki boshlang'ich ma'lumot yo'qolgan).
+        try:
+            balance = client.get_account_balance(timeout=10)
+            pip_value_per_lot = float(_symbol_info.lot_size) / 100.0
+            lots = bp["volume_units"] / _symbol_info.lot_size
+            sl_distance = abs(entry_price - current_sl)
+            risk_amount = lots * sl_distance * pip_value_per_lot
+            risk_percent = (risk_amount / balance) * 100.0 if balance > 0 else 0.0
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Pozitsiya %s uchun risk% hisoblab bo'lmadi — 0%% deb belgilanadi",
+                bp["position_id"],
+            )
+            risk_percent = 0.0
+
+        risk_manager.register_open_position(str(bp["position_id"]), risk_percent)
+
+        logger.warning(
+            "TIKLANDI (orphan): pos=%s %s entry=%s SL=%s TP=%s risk=%.2f%% "
+            "— TP-CHECKPOINT TRAILING O'CHIRILGAN (faqat kuzatuv/risk-hisob ishlaydi)",
+            bp["position_id"],
+            bp["side"],
+            entry_price,
+            current_sl,
+            current_tp,
+            risk_percent,
+        )
 
 
 # ----------------------------------------------------------------------
