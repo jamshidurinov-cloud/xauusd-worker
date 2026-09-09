@@ -54,6 +54,7 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
 )
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
     ProtoOAOrderType,
+    ProtoOAPositionStatus,
     ProtoOATradeSide,
 )
 from twisted.internet import reactor
@@ -472,6 +473,34 @@ class CTraderClient:
         deferred = self._client.send(req)
         deferred.addErrback(self._log_deferred_error, context="SubscribeSpots")
         logger.info("Narx oqimiga obuna yuborildi: %s", symbol_ids)
+
+    def get_open_position_ids(self, timeout: float = 10.0) -> set:
+        """
+        Broker'da HOZIR haqiqatan ham ochiq turgan pozitsiyalar ID'lari
+        ro'yxatini so'raydi. Bu — xavfsizlik uchun ikkinchi qatlam: agar
+        biror sababdan execution event orqali pozitsiya yopilgani "eshitilib
+        qolmagan" bo'lsa (masalan qisqa tarmoq uzilishi), davriy reconcile
+        orqali xotiradagi holat broker bilan solishtirilib tuzatiladi.
+        """
+        done = threading.Event()
+        result: dict = {}
+
+        def _on_reconcile(extracted):
+            ids = set()
+            for pos in extracted.position:
+                if pos.positionStatus == ProtoOAPositionStatus.POSITION_STATUS_OPEN:
+                    ids.add(pos.positionId)
+            result["ids"] = ids
+            done.set()
+
+        req = ProtoOAReconcileReq()
+        req.ctidTraderAccountId = self._account_id
+        self._send_and_await(req, _on_reconcile)
+
+        if not done.wait(timeout=timeout):
+            raise CTraderError("Reconcile javobi kelmadi (timeout)")
+
+        return result["ids"]
 
     def reconcile_open_positions(self):
         """
