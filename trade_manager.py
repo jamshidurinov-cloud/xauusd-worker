@@ -135,6 +135,13 @@ class TradeManager:
         MUHIM: checkpoint'lar KETMA-KET tekshiriladi (eng yuqoridan pastga),
         shunda narx bir daqiqada bir nechta checkpoint'ni "sakrab o'tgan"
         bo'lsa ham, eng oxirgi (eng uzoq) tegishli holatga to'g'ri o'tkaziladi.
+
+        SL TRAILING MANTIG'I (tashqi swing-hisoblashsiz, faqat mavjud TP
+        darajalariga asoslangan — ishonchli va oldindan aniq):
+          TP2  o'tilsa -> SL = entry (breakeven)
+          TP3  o'tilsa -> SL = TP2,  TP = TP10
+          TP5  o'tilsa -> SL = TP3,  TP = TP15
+          TP10 o'tilsa -> SL = TP5  (TP15 — oxirgi, o'zgarmaydi)
         """
         with self._lock:
             pos = self._positions.get(position_id)
@@ -148,28 +155,31 @@ class TradeManager:
 
             if not pos.tp10_triggered and self._price_reached(pos.side, current_price, pos.tp10):
                 pos.tp10_triggered = True
-                pos.current_sl = pos.current_sl  # yangi swing qiymati worker.py'dan keladi
+                pos.current_sl = pos.tp5
                 logger.info(
-                    "Pozitsiya %s: TP10 checkpoint o'tildi. SL yangilanishi kerak (swing).",
+                    "Pozitsiya %s: TP10 checkpoint o'tildi. SL -> TP5 (%.4f).",
                     position_id,
+                    pos.tp5,
                 )
                 return TrailingAction(
                     position_id=position_id,
-                    new_sl=None,  # worker.py joriy swing narxini hisoblab to'ldiradi
+                    new_sl=pos.tp5,
                     new_tp=None,  # TP15 — oxirgi, o'zgarmaydi
-                    reason="TP10_REACHED_SL_TO_SWING",
+                    reason="TP10_REACHED_SL_TO_TP5",
                 )
 
             if not pos.tp5_triggered and self._price_reached(pos.side, current_price, pos.tp5):
                 pos.tp5_triggered = True
                 pos.current_tp = pos.tp15
+                pos.current_sl = pos.tp3
                 logger.info(
-                    "Pozitsiya %s: TP5 checkpoint o'tildi. TP10 -> TP15, SL -> swing.",
+                    "Pozitsiya %s: TP5 checkpoint o'tildi. TP10 -> TP15, SL -> TP3 (%.4f).",
                     position_id,
+                    pos.tp3,
                 )
                 return TrailingAction(
                     position_id=position_id,
-                    new_sl=None,  # worker.py swing narxini to'ldiradi
+                    new_sl=pos.tp3,
                     new_tp=pos.tp15,
                     reason="TP5_REACHED_TP_TO_TP15",
                 )
@@ -177,13 +187,15 @@ class TradeManager:
             if not pos.tp3_triggered and self._price_reached(pos.side, current_price, pos.tp3):
                 pos.tp3_triggered = True
                 pos.current_tp = pos.tp10
+                pos.current_sl = pos.tp2
                 logger.info(
-                    "Pozitsiya %s: TP3 checkpoint o'tildi. TP5 -> TP10, SL -> swing.",
+                    "Pozitsiya %s: TP3 checkpoint o'tildi. TP5 -> TP10, SL -> TP2 (%.4f).",
                     position_id,
+                    pos.tp2,
                 )
                 return TrailingAction(
                     position_id=position_id,
-                    new_sl=None,  # worker.py swing narxini to'ldiradi
+                    new_sl=pos.tp2,
                     new_tp=pos.tp10,
                     reason="TP3_REACHED_TP_TO_TP10",
                 )
@@ -204,14 +216,3 @@ class TradeManager:
                 )
 
             return None
-
-    def apply_swing_sl(self, position_id: int, swing_price: float) -> None:
-        """
-        worker.py TP3/TP5/TP10 checkpoint'idan keyin eng so'nggi tasdiqlangan
-        swing narxini hisoblab, shu funksiya orqali xotiradagi holatni
-        yangilaydi (broker'ga yuborishdan keyin, muvaffaqiyatli bo'lsa).
-        """
-        with self._lock:
-            pos = self._positions.get(position_id)
-            if pos:
-                pos.current_sl = swing_price
