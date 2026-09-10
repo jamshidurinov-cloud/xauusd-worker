@@ -123,6 +123,14 @@ def _on_spot_price(symbol_id: int, raw_bid: int) -> None:
     with _latest_prices_lock:
         _latest_prices[symbol_id] = real_price
         _latest_price_timestamps[symbol_id] = time.time()
+
+    # MUHIM: har bir yangi tick kelganda (millisekundlarda, 60 soniyalik
+    # trailing siklidan MUSTAQIL) barcha ochiq pozitsiyalarning "eng yaxshi
+    # erishilgan narxi" yangilanadi — shunda narx checkpoint'ga tegib,
+    # keyingi trailing tekshiruvigacha ORQAGA qaytib ketgan bo'lsa ham,
+    # checkpoint o'tkazib yuborilmaydi.
+    trade_manager.update_best_price(real_price)
+
     if not _price_feed_ever_received:
         _price_feed_ever_received = True
         logger.info(
