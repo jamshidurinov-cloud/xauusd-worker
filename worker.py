@@ -108,18 +108,28 @@ logger.warning(
 risk_manager = RiskManager(RISK_CONFIG)
 trade_manager = TradeManager()
 _latest_prices: dict[int, float] = {}
+_latest_price_timestamps: dict[int, float] = {}
 _latest_prices_lock = threading.Lock()
 _symbol_info: Optional[SymbolInfo] = None
+_price_feed_ever_received = False
 
 
 def _on_spot_price(symbol_id: int, raw_bid: int) -> None:
     """cTrader xom narxni butun sonda yuboradi; digits asosida o'nlik qilamiz."""
-    global _symbol_info
+    global _symbol_info, _price_feed_ever_received
     if _symbol_info is None:
         return
     real_price = raw_bid / (10 ** _symbol_info.digits)
     with _latest_prices_lock:
         _latest_prices[symbol_id] = real_price
+        _latest_price_timestamps[symbol_id] = time.time()
+    if not _price_feed_ever_received:
+        _price_feed_ever_received = True
+        logger.info(
+            "Narx oqimi TASDIQLANDI — birinchi narx qabul qilindi: symbol_id=%s narx=%s",
+            symbol_id,
+            real_price,
+        )
 
 
 def _on_ctrader_error(message: str) -> None:
@@ -533,14 +543,35 @@ def _compute_dynamic_risk_percent(pos, current_sl: float) -> float:
     return min(dynamic_risk, pos.risk_percent)
 
 
+_no_price_warning_count = 0
+
+
 def _run_trailing_check_once() -> None:
+    global _no_price_warning_count
     if _symbol_info is None:
         return
 
     current_price = _get_current_price(_symbol_info.symbol_id)
     if current_price is None:
-        logger.debug("Hali joriy narx kelmagan (spot subscription kutilmoqda)")
+        _no_price_warning_count += 1
+        # Birinchi bir necha marta DEBUG (odatiy, ulanish endigina
+        # boshlanayotgan bo'lishi mumkin), lekin agar bu davom etsa —
+        # bu ANIQ muammo, va uni ko'rinadigan (WARNING) qilish SHART,
+        # aks holda trailing "sababsiz" ishlamay qolishi mumkin (buni
+        # avvalgi versiyada DEBUG darajasida yashirilgani sababli sezmay
+        # qolgan edik).
+        if _no_price_warning_count <= 3:
+            logger.debug("Hali joriy narx kelmagan (spot subscription kutilmoqda)")
+        else:
+            logger.warning(
+                "NARX HALI YO'Q — %s marta ketma-ket! Spot subscription "
+                "ishlamayotgan bo'lishi mumkin. Ochiq pozitsiyalar TRAILING "
+                "QILINMAYAPTI.",
+                _no_price_warning_count,
+            )
         return
+
+    _no_price_warning_count = 0
 
     for pos in trade_manager.get_all_positions():
         action = trade_manager.evaluate(pos.position_id, current_price)
