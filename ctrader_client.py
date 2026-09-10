@@ -215,13 +215,20 @@ class CTraderClient:
                 self._on_execution_event(extracted)
 
         elif isinstance(extracted, ProtoOASpotEvent) or type_name == "ProtoOASpotEvent":
-            # cTrader narxlarni odatda "1e5 ga ko'paytirilgan butun son"
-            # ko'rinishida yuboradi (digits/pip_position'ga qarab). Aniq
-            # bo'linuvchini symbol ma'lumotidan (SymbolInfo.digits) olish
-            # kerak — worker.py shu konvertatsiyani bajaradi. Bu yerda xom
-            # qiymat o'zgarishsiz yuboriladi.
-            if self._on_spot_price and extracted.HasField("bid"):
-                self._on_spot_price(extracted.symbolId, extracted.bid)
+            # MUHIM TUZATISH: extracted.HasField("bid") BU YERDA ISHLATILMAYDI —
+            # ProtoOASpotEvent.bid proto3'da oddiy (optional bo'lmagan) sonli
+            # maydon bo'lishi mumkin, va bunday maydonga .HasField() chaqirish
+            # ValueError beradi. Bu xato ushbu funksiya try/except bilan
+            # o'ralmagani uchun HAR SAFAR jimgina yutilib, natijada narx
+            # HECH QACHON _on_spot_price'ga yetib bormagan — bu esa butun
+            # TRAILING TIZIMINI ISHLATMAY QO'YGAN edi (joriy narx doim "yo'q"
+            # deb hisoblanardi). Endi xavfsiz tekshiruv bilan almashtirildi.
+            try:
+                bid_value = extracted.bid
+                if self._on_spot_price and bid_value:
+                    self._on_spot_price(extracted.symbolId, bid_value)
+            except Exception:  # noqa: BLE001
+                logger.exception("Spot event'ni qayta ishlashda xato")
 
         else:
             logger.debug("Boshqa xabar turi qabul qilindi: %s", type_name)
@@ -396,7 +403,17 @@ class CTraderClient:
         sl_price: Optional[float] = None,
         tp_price: Optional[float] = None,
     ):
-        """Ochiq pozitsiyaning SL va/yoki TP narxini yangilaydi (trailing uchun)."""
+        """
+        Ochiq pozitsiyaning SL va/yoki TP narxini yangilaydi (trailing uchun).
+
+        MUHIM TUZATISH: avval faqat XATO bo'lsa log qilinardi (errback),
+        MUVAFFAQIYAT esa "jim" edi — ya'ni so'rov yuborilgani ko'rinardi,
+        lekin broker haqiqatan ham qabul qilganini TASDIQLOVCHI hech qanday
+        log yo'q edi. Bu amaliyotda "so'rov yuborildi, lekin natija noma'lum"
+        degan noaniq holatlarga olib kelgan (masalan javob umuman kelmasa,
+        buni bilib bo'lmas edi). Endi HAR IKKALA holat ham (muvaffaqiyat va
+        xato) aniq, alohida log qilinadi.
+        """
         req = ProtoOAAmendPositionSLTPReq()
         req.ctidTraderAccountId = self._account_id
         req.positionId = position_id
@@ -412,8 +429,30 @@ class CTraderClient:
             tp_price,
         )
 
+        def _on_amend_success(response):
+            try:
+                extracted = Protobuf.extract(response)
+                logger.info(
+                    "SL/TP AMEND JAVOBI KELDI: position_id=%s javob_turi=%s tarkibi=%s",
+                    position_id,
+                    type(extracted).__name__,
+                    extracted,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "SL/TP amend javobini o'qishda xato: position_id=%s", position_id
+                )
+
+        def _on_amend_error(failure):
+            logger.error(
+                "SL/TP AMEND RAD ETILDI yoki XATO: position_id=%s xato=%s",
+                position_id,
+                failure,
+            )
+
         deferred = self._client.send(req)
-        deferred.addErrback(self._log_deferred_error, context="AmendSLTP")
+        deferred.addCallback(_on_amend_success)
+        deferred.addErrback(_on_amend_error)
         return deferred
 
     def close_position(self, position_id: int, volume_in_units: int):
