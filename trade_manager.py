@@ -58,6 +58,14 @@ class ManagedPosition:
     current_sl: float = field(init=False)
     current_tp: float = field(init=False)
 
+    # Har bir yangi narx (tick) kelganda yangilanadigan "eng yaxshi
+    # erishilgan narx" — BUY uchun ENG YUQORI, SELL uchun ENG PAST.
+    # MUHIM: bu — trailing tekshiruvining 60 soniyalik oralig'i ichida
+    # narx checkpoint'ga tegib, keyin QAYTIB ketgan holatlarni "ko'rmay
+    # qolish"ning oldini oladi. Trailing checkpoint'lari joriy (instant)
+    # narx o'rniga aynan shu qiymat bilan solishtiriladi.
+    best_price: float = field(init=False)
+
     # Worker qayta ishga tushganda broker'dan "eng yaqin holatda" tiklangan
     # pozitsiyalar uchun False bo'ladi — chunki asl TP2-TP15 checkpoint'lari
     # (faqat signal payload'ida bo'lgan, broker'da saqlanmaydigan) yo'qolgan.
@@ -76,6 +84,7 @@ class ManagedPosition:
     def __post_init__(self):
         self.current_sl = self.initial_sl
         self.current_tp = self.tp5  # boshlang'ich TP har doim TP5
+        self.best_price = self.entry_price  # dastlab, hali hech qayerga bormagan
 
 
 @dataclass
@@ -134,6 +143,22 @@ class TradeManager:
             return current_price >= level
         return current_price <= level
 
+    def update_best_price(self, current_price: float) -> None:
+        """
+        Har safar YANGI narx (tick) kelganda chaqiriladi — barcha ochiq
+        pozitsiyalarning "eng yaxshi erishilgan narxi"ni yangilaydi.
+        BUY uchun narx yuqoriga chiqqanda, SELL uchun pastga tushganda
+        yangilanadi (aks holda o'zgarishsiz qoladi).
+        """
+        with self._lock:
+            for pos in self._positions.values():
+                if pos.side == TradeSide.BUY:
+                    if current_price > pos.best_price:
+                        pos.best_price = current_price
+                else:
+                    if current_price < pos.best_price:
+                        pos.best_price = current_price
+
     def evaluate(self, position_id: int, current_price: float) -> Optional[TrailingAction]:
         """
         Bitta pozitsiya uchun joriy narxni tekshiradi va checkpoint(lar)
@@ -173,11 +198,28 @@ class TradeManager:
                 # shuning uchun trailing amalga oshirilmaydi (xavfsizlik).
                 return None
 
+            # Xavfsizlik uchun: agar chaqiruvchi update_best_price()ni
+            # alohida chaqirmagan bo'lsa ham, shu yerdagi current_price
+            # baribir best_price'ga "qo'shiladi" (faqat foydali tomonga).
+            if pos.side == TradeSide.BUY:
+                if current_price > pos.best_price:
+                    pos.best_price = current_price
+            else:
+                if current_price < pos.best_price:
+                    pos.best_price = current_price
+
+            # BARCHA checkpoint tekshiruvlari endi JORIY (instant) narx
+            # o'rniga ENG YAXSHI ERISHILGAN narx (best_price) bilan
+            # solishtiriladi — shunda narx checkpoint'ga tegib, 60 soniyalik
+            # tekshiruv oralig'ida ORQAGA qaytib ketgan bo'lsa ham,
+            # checkpoint "ko'rilmay qolmaydi".
+            eval_price = pos.best_price
+
             any_triggered = False
             last_reason = ""
 
             # 1) TP2 — eng yaqin checkpoint, birinchi tekshiriladi
-            if not pos.tp2_triggered and self._price_reached(pos.side, current_price, pos.tp2):
+            if not pos.tp2_triggered and self._price_reached(pos.side, eval_price, pos.tp2):
                 pos.tp2_triggered = True
                 pos.current_sl = pos.entry_price
                 any_triggered = True
@@ -189,7 +231,7 @@ class TradeManager:
                 )
 
             # 2) TP3 — faqat TP2'dan KEYIN, o'sish tartibida
-            if not pos.tp3_triggered and self._price_reached(pos.side, current_price, pos.tp3):
+            if not pos.tp3_triggered and self._price_reached(pos.side, eval_price, pos.tp3):
                 pos.tp3_triggered = True
                 pos.current_sl = pos.tp2
                 pos.current_tp = pos.tp10
@@ -202,7 +244,7 @@ class TradeManager:
                 )
 
             # 3) TP5
-            if not pos.tp5_triggered and self._price_reached(pos.side, current_price, pos.tp5):
+            if not pos.tp5_triggered and self._price_reached(pos.side, eval_price, pos.tp5):
                 pos.tp5_triggered = True
                 pos.current_sl = pos.tp3
                 pos.current_tp = pos.tp15
@@ -215,7 +257,7 @@ class TradeManager:
                 )
 
             # 4) TP10 — eng uzoq checkpoint, oxirida tekshiriladi
-            if not pos.tp10_triggered and self._price_reached(pos.side, current_price, pos.tp10):
+            if not pos.tp10_triggered and self._price_reached(pos.side, eval_price, pos.tp10):
                 pos.tp10_triggered = True
                 pos.current_sl = pos.tp5
                 any_triggered = True
