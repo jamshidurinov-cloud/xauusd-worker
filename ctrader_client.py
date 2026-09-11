@@ -127,7 +127,14 @@ class CTraderClient:
             self._account_id,
         )
 
-        self._client = Client(host, port, TcpProtocol)
+        # MUHIM TUZATISH: kutubxonaning standart ichki buyruq-timeout'i
+        # (timeoutForCommands) — 5 soniya. Bu qiymat katta so'rovlar
+        # (masalan ProtoOAGetTrendbarsReq — 100+ sham) uchun YETARLI EMAS,
+        # va "TimeoutError: (5, 'Deferred')" xatosiga olib keladi — bu
+        # bizning o'z get_trendbars(timeout=15) parametrimizga ALOQASI YO'Q,
+        # chunki xato undan OLDINROQ, kutubxona darajasida sodir bo'ladi.
+        # Shuning uchun bu yerda aniq, uzunroq qiymat beriladi.
+        self._client = Client(host, port, TcpProtocol, timeoutForCommands=30)
         self._client.setConnectedCallback(self._on_connected)
         self._client.setDisconnectedCallback(self._on_disconnected)
         self._client.setMessageReceivedCallback(self._on_message)
