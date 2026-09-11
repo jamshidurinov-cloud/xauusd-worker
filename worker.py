@@ -113,6 +113,29 @@ _latest_prices_lock = threading.Lock()
 _symbol_info: Optional[SymbolInfo] = None
 _price_feed_ever_received = False
 
+# /price endpoint uchun — bid VA ask ikkalasi ham kelganda saqlanadi
+# (asosiy trailing mantig'i faqat bid'ga tayanadi, bu alohida, unga
+# ta'sir qilmaydi).
+_latest_bid_ask: dict[int, tuple] = {}
+_latest_bid_ask_lock = threading.Lock()
+
+
+def _on_spot_price_full(symbol_id: int, bid: int, ask: int) -> None:
+    """/price endpoint uchun — bid va ask ikkalasini birga saqlaydi."""
+    if _symbol_info is None:
+        return
+    divisor = 10 ** _symbol_info.digits
+    with _latest_bid_ask_lock:
+        _latest_bid_ask[symbol_id] = (bid / divisor, ask / divisor)
+
+
+def get_latest_bid_ask_for_market_data() -> tuple:
+    """market_data.py uchun — joriy (bid, ask) juftligini qaytaradi."""
+    if _symbol_info is None:
+        return (None, None)
+    with _latest_bid_ask_lock:
+        return _latest_bid_ask.get(_symbol_info.symbol_id, (None, None))
+
 
 def _on_spot_price(symbol_id: int, raw_bid: int) -> None:
     """cTrader xom narxni butun sonda yuboradi; digits asosida o'nlik qilamiz."""
@@ -178,6 +201,7 @@ client = CTraderClient(
     on_execution_event=_on_execution_event,
     on_error=_on_ctrader_error,
     on_spot_price=_on_spot_price,
+    on_spot_price_full=_on_spot_price_full,
 )
 
 
@@ -265,7 +289,9 @@ def _recover_orphan_positions() -> None:
             tp2=placeholder_tp,
             tp3=placeholder_tp,
             tp5=placeholder_tp,
+            tp8=placeholder_tp,
             tp10=placeholder_tp,
+            tp12=placeholder_tp,
             tp15=placeholder_tp,
             volume_units=bp["volume_units"],
             risk_percent=0.0,  # pastda dinamik hisoblanadi
@@ -327,6 +353,15 @@ def handle_new_signal(payload: dict) -> dict:
         tp5 = float(payload["tp5"])
         tp10 = float(payload["tp10"])
         tp15 = float(payload["tp15"])
+        # tp8/tp12 — yangi maydonlar (TP5-TP10 orasidagi katta bo'shliqni
+        # kamaytirish uchun). ORQAGA MOSLIK: agar main.py hali eski
+        # formatda (tp8/tp12'siz) signal yuborsa, xavfsiz standart qiymat
+        # sifatida mos ravishda tp10/tp15'ga tenglashtiriladi — bu holda
+        # checkpoint zanjiri avtomatik ravishda eski 5-bosqichli xatti-
+        # harakatga "qulaydi" (tp8=tp10 bo'lgani uchun ular deyarli bir
+        # vaqtda ishga tushadi, natija amalda eskisiga teng bo'ladi).
+        tp8 = float(payload.get("tp8", tp10))
+        tp12 = float(payload.get("tp12", tp15))
         event_key = str(payload.get("event_key", ""))
     except (KeyError, ValueError, TypeError) as exc:
         logger.error("Signal payload noto'g'ri formatda: %s", exc)
@@ -353,7 +388,9 @@ def handle_new_signal(payload: dict) -> dict:
     tp2 = round(tp2, digits)
     tp3 = round(tp3, digits)
     tp5 = round(tp5, digits)
+    tp8 = round(tp8, digits)
     tp10 = round(tp10, digits)
+    tp12 = round(tp12, digits)
     tp15 = round(tp15, digits)
 
     try:
@@ -451,7 +488,9 @@ def handle_new_signal(payload: dict) -> dict:
         tp2=tp2,
         tp3=tp3,
         tp5=tp5,
+        tp8=tp8,
         tp10=tp10,
+        tp12=tp12,
         tp15=tp15,
         volume_units=volume_units,
         risk_percent=sizing.real_risk_percent,
@@ -665,6 +704,21 @@ def _is_authorized(req) -> bool:
     expected = f"Bearer {WORKER_SECRET_KEY}"
     # hmac.compare_digest — timing-attack'lardan himoya qiluvchi taqqoslash
     return hmac.compare_digest(auth_header, expected)
+
+
+# /candles va /price endpoint'lari — alohida market_data.py faylida,
+# signal/trailing mantig'idan ajratilgan holda joylashgan. Shu yerda
+# faqat ULANADI (worker.py'ning mavjud obyektlari uzatiladi).
+from market_data import init_market_data  # noqa: E402  (pastda joylashuvi ataylab)
+
+app.register_blueprint(
+    init_market_data(
+        client=client,
+        get_symbol_info=lambda: _symbol_info,
+        is_authorized=_is_authorized,
+        get_latest_bid_ask=get_latest_bid_ask_for_market_data,
+    )
+)
 
 
 @app.route("/signal", methods=["POST"])
