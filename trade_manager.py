@@ -66,6 +66,12 @@ class ManagedPosition:
     # narx o'rniga aynan shu qiymat bilan solishtiriladi.
     best_price: float = field(init=False)
 
+    # True bo'lsa — pos.current_sl/current_tp broker'ga hali YUBORILMAGAN
+    # (yoki yuborilgan, lekin joriy narxga nomos bo'lgani uchun rad etilishi
+    # muqarrar bo'lgani sababli, ATAYLAB yuborilmagan). Worker har trailing
+    # siklida shu flag True bo'lgan pozitsiyalar uchun qayta urinadi.
+    pending_broker_sync: bool = False
+
     # Worker qayta ishga tushganda broker'dan "eng yaqin holatda" tiklangan
     # pozitsiyalar uchun False bo'ladi — chunki asl TP2-TP15 checkpoint'lari
     # (faqat signal payload'ida bo'lgan, broker'da saqlanmaydigan) yo'qolgan.
@@ -270,6 +276,12 @@ class TradeManager:
 
             if not any_triggered:
                 return None
+
+            # Kamida bitta checkpoint o'tildi — bu holatni broker'ga
+            # YUBORISH KERAK deb belgilaymiz. Haqiqiy yuborish (va joriy
+            # narxga mos-nomosligini tekshirish) worker.py'da amalga
+            # oshiriladi — bu yerda faqat "yetkazish kerak" belgisi qo'yiladi.
+            pos.pending_broker_sync = True
 
             logger.info(
                 "Pozitsiya %s: YAKUNIY holat (bir yoki bir nechta checkpoint "
