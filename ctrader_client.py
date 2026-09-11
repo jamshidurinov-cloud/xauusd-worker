@@ -50,12 +50,14 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOASubscribeSpotsReq,
     ProtoOASymbolByIdReq,
     ProtoOASymbolsListReq,
+    ProtoOAGetTrendbarsReq,
     ProtoOATraderReq,
 )
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
     ProtoOAOrderType,
     ProtoOAPositionStatus,
     ProtoOATradeSide,
+    ProtoOATrendbarPeriod,
 )
 from twisted.internet import reactor
 
@@ -95,6 +97,7 @@ class CTraderClient:
         on_execution_event: Optional[Callable[[object], None]] = None,
         on_error: Optional[Callable[[str], None]] = None,
         on_spot_price: Optional[Callable[[int, float], None]] = None,
+        on_spot_price_full: Optional[Callable[[int, float, float], None]] = None,
     ):
         if not client_id or not client_secret or not access_token:
             raise ValueError(
@@ -112,6 +115,7 @@ class CTraderClient:
         self._on_execution_event = on_execution_event
         self._on_error = on_error
         self._on_spot_price = on_spot_price
+        self._on_spot_price_full = on_spot_price_full
 
         host = EndPoints.PROTOBUF_DEMO_HOST if demo_mode else EndPoints.PROTOBUF_LIVE_HOST
         port = EndPoints.PROTOBUF_PORT
@@ -227,6 +231,13 @@ class CTraderClient:
                 bid_value = extracted.bid
                 if self._on_spot_price and bid_value:
                     self._on_spot_price(extracted.symbolId, bid_value)
+                # Ixtiyoriy: agar ask ham shu xabarda kelgan bo'lsa (har doim
+                # kelavermaydi — cTrader ba'zan faqat bid, ba'zan faqat ask
+                # yangilanganda xabar yuboradi), /price endpoint uchun
+                # alohida callback orqali uzatiladi.
+                ask_value = getattr(extracted, "ask", 0)
+                if self._on_spot_price_full and bid_value and ask_value:
+                    self._on_spot_price_full(extracted.symbolId, bid_value, ask_value)
             except Exception:  # noqa: BLE001
                 logger.exception("Spot event'ni qayta ishlashda xato")
 
@@ -579,6 +590,81 @@ class CTraderClient:
             raise CTraderError("Reconcile javobi kelmadi (timeout)")
 
         return result["ids"]
+
+    def get_trendbars(
+        self,
+        symbol_id: int,
+        digits: int,
+        timeframe: str,
+        count: int,
+        timeout: float = 15.0,
+    ) -> list:
+        """
+        So'nggi N ta shamni (candle) cTrader'dan so'raydi, ESKIDAN YANGIGA
+        tartiblangan holda qaytaradi.
+
+        timeframe: "1min" yoki "5min" (boshqa qiymat ValueError beradi).
+        count: nechta sham kerakligi (1-1000 oralig'ida cheklanadi, chunki
+        cTrader odatda bitta so'rovda shuncha bergacha ruxsat beradi).
+
+        MUHIM — narx kodlash formati: cTrader trendbar'da narxlar "low"
+        (asosiy, butun sonda, digits'ga ko'ra masshtablangan) va undan
+        FARQ (delta) sifatida kodlangan open/high/close qiymatlari bilan
+        keladi:
+            haqiqiy_low   = trendbar.low / 10**digits
+            haqiqiy_open  = (trendbar.low + trendbar.deltaOpen) / 10**digits
+            haqiqiy_high  = (trendbar.low + trendbar.deltaHigh) / 10**digits
+            haqiqiy_close = (trendbar.low + trendbar.deltaClose) / 10**digits
+        Bu — hujjatlashtirilgan standart format, lekin BIRINCHI HAQIQIY
+        SO'ROVDAN KEYIN natijani (masalan cTrader terminalidagi narx bilan
+        solishtirib) tasdiqlash tavsiya etiladi — kutubxona versiyasiga
+        qarab farq qilishi RISKI bor.
+        """
+        period_map = {"1min": ProtoOATrendbarPeriod.M1, "5min": ProtoOATrendbarPeriod.M5}
+        if timeframe not in period_map:
+            raise ValueError(f"Noma'lum timeframe: {timeframe} (faqat '1min' yoki '5min')")
+
+        count = max(1, min(int(count), 1000))
+
+        done = threading.Event()
+        result: dict = {}
+
+        def _on_trendbars(extracted):
+            bars = []
+            for tb in extracted.trendbar:
+                low = tb.low / (10 ** digits)
+                open_ = (tb.low + tb.deltaOpen) / (10 ** digits)
+                high = (tb.low + tb.deltaHigh) / (10 ** digits)
+                close = (tb.low + tb.deltaClose) / (10 ** digits)
+                bars.append(
+                    {
+                        "timestamp_min": tb.utcTimestampInMinutes,
+                        "open": open_,
+                        "high": high,
+                        "low": low,
+                        "close": close,
+                        "volume": tb.volume,
+                    }
+                )
+            # cTrader odatda yangidan eskiga beradi — eskidan yangiga
+            # (o'sish tartibida) qaytarish uchun teskari qilamiz.
+            bars.sort(key=lambda b: b["timestamp_min"])
+            result["bars"] = bars
+            done.set()
+
+        req = ProtoOAGetTrendbarsReq()
+        req.ctidTraderAccountId = self._account_id
+        req.symbolId = symbol_id
+        req.period = period_map[timeframe]
+        req.count = count
+        req.toTimestamp = int(time.time() * 1000)
+
+        self._send_and_await(req, _on_trendbars)
+
+        if not done.wait(timeout=timeout):
+            raise CTraderError(f"Trendbar so'rovi {timeout}s ichida javob bermadi")
+
+        return result["bars"]
 
     def reconcile_open_positions(self):
         """
