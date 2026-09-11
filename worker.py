@@ -582,49 +582,76 @@ def _run_trailing_check_once() -> None:
     _no_price_warning_count = 0
 
     for pos in trade_manager.get_all_positions():
-        action = trade_manager.evaluate(pos.position_id, current_price)
-        if action is None:
+        # evaluate() har doim chaqiriladi — yangi checkpoint o'tilgan bo'lsa
+        # ichki holatni (current_sl/current_tp) yangilaydi va
+        # pending_broker_sync=True qo'yadi. Qaytgan `action`ning o'zi endi
+        # faqat LOG uchun (sabab matni) ishlatiladi — haqiqiy yuborish
+        # pastdagi pending_broker_sync orqali, xavfsizlik tekshiruvidan
+        # o'tgandan keyingina amalga oshiriladi.
+        trade_manager.evaluate(pos.position_id, current_price)
+
+        if not pos.pending_broker_sync:
             continue
 
-        # SL/TP endi to'liq trade_manager.evaluate() ichida, mavjud TP
-        # darajalariga asoslanib hisoblanadi (tashqi swing-hisoblash
-        # kerak emas — ishonchli va oldindan aniq).
-        new_sl = action.new_sl
-        new_tp = action.new_tp
+        digits = _symbol_info.digits if _symbol_info else 2
+        candidate_sl = round(pos.current_sl, digits) if pos.current_sl is not None else None
+        candidate_tp = round(pos.current_tp, digits) if pos.current_tp is not None else None
 
-        if new_sl is not None or new_tp is not None:
-            digits = _symbol_info.digits if _symbol_info else 2
+        # XAVFSIZLIK TEKSHIRUVI (MUHIM TUZATISH): broker "TRADING_BAD_STOPS"
+        # xatosini qaytargan holat aniqlangan edi — high-water mark orqali
+        # hisoblangan SL/TP ba'zan narx KESKIN teskari tomonga qaytib
+        # ketganda, JORIY (instant) narxga nisbatan NOTO'G'RI TOMONDA
+        # qolib qolishi mumkin (masalan BUY uchun SL joriy narxdan
+        # YUQORIDA chiqib qolishi). Bunday holda amend YUBORILMAYDI —
+        # pending_broker_sync=True holicha qoladi, keyingi (1 daqiqadan
+        # keyingi) siklda narx to'g'rilanganda avtomatik qayta uriniladi.
+        sl_ok = True
+        tp_ok = True
+        if candidate_sl is not None:
+            if pos.side == TradeSide.BUY:
+                sl_ok = candidate_sl < current_price
+            else:
+                sl_ok = candidate_sl > current_price
+        if candidate_tp is not None:
+            if pos.side == TradeSide.BUY:
+                tp_ok = candidate_tp > current_price
+            else:
+                tp_ok = candidate_tp < current_price
 
-            # MUHIM: cTrader amend so'rovi TO'LIQ holatni kutadi — agar
-            # faqat o'zgargan maydon (masalan SL) yuborilib, TP jo'natilmasa,
-            # broker buni "TP'ni OLIB TASHLA" deb tushunishi mumkin. Shuning
-            # uchun har doim IKKALASINI HAM (joriy holat asosida) birga
-            # yuboramiz — hech qachon faqat bittasini emas.
-            final_sl = new_sl if new_sl is not None else pos.current_sl
-            final_tp = new_tp if new_tp is not None else pos.current_tp
-            final_sl = round(final_sl, digits) if final_sl is not None else None
-            final_tp = round(final_tp, digits) if final_tp is not None else None
-
-            client.amend_position_sl_tp(
-                position_id=pos.position_id,
-                sl_price=final_sl,
-                tp_price=final_tp,
-            )
-            logger.info(
-                "TRAILING AMALGA OSHIRILDI: pos=%s sabab=%s SL=%s TP=%s",
+        if not (sl_ok and tp_ok):
+            logger.warning(
+                "Pozitsiya %s: hisoblangan SL=%s TP=%s hali JORIY narxga "
+                "(%.4f, %s) mos emas — broker'ga YUBORILMADI (xavfsizlik), "
+                "keyingi siklda qayta uriniladi.",
                 pos.position_id,
-                action.reason,
-                final_sl,
-                final_tp,
+                candidate_sl,
+                candidate_tp,
+                current_price,
+                pos.side.value,
             )
+            continue  # pending_broker_sync=True holicha qoladi
 
-            # SL o'zgargan bo'lsa (bu safar aynan shu tekshiruvda), risk-modul
-            # dagi "band qilingan" risk%ni ham qayta hisoblaymiz — SL
-            # foyda/breakeven tomon surilgan bo'lsa, kelasi signal(lar) uchun
-            # jami risk chegarasidan avtomatik "joy bo'shaydi".
-            if new_sl is not None:
-                dynamic_risk = _compute_dynamic_risk_percent(pos, final_sl)
-                risk_manager.update_position_risk(str(pos.position_id), dynamic_risk)
+        client.amend_position_sl_tp(
+            position_id=pos.position_id,
+            sl_price=candidate_sl,
+            tp_price=candidate_tp,
+        )
+        logger.info(
+            "TRAILING AMALGA OSHIRILDI (xavfsizlik tekshiruvidan o'tdi): "
+            "pos=%s SL=%s TP=%s",
+            pos.position_id,
+            candidate_sl,
+            candidate_tp,
+        )
+
+        # Faqat MUVAFFAQIYATLI (xavfsizlik tekshiruvidan o'tgan) yuborishdan
+        # keyin risk% yangilanadi — avval xato holatda ham "0%" deb
+        # belgilab qo'yish xavfi bor edi, endi bu tuzatildi.
+        if candidate_sl is not None:
+            dynamic_risk = _compute_dynamic_risk_percent(pos, candidate_sl)
+            risk_manager.update_position_risk(str(pos.position_id), dynamic_risk)
+
+        pos.pending_broker_sync = False
 
 
 # ----------------------------------------------------------------------
