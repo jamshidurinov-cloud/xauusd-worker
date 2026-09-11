@@ -124,7 +124,16 @@ def _on_spot_price_full(symbol_id: int, bid: int, ask: int) -> None:
     """/price endpoint uchun — bid va ask ikkalasini birga saqlaydi."""
     if _symbol_info is None:
         return
-    divisor = 10 ** _symbol_info.digits
+    # MUHIM TUZATISH: cTrader ProtoOASpotEvent'dagi bid/ask har doim
+    # FIKSIRLANGAN 100000 (1e5) shkalada keladi — bu symbol.digits'ga
+    # BOG'LIQ EMAS (digits faqat ko'rsatish/yaxlitlash uchun ishlatiladi).
+    # Avval noto'g'ri "10**digits" (masalan 100) ishlatilgan edi — bu
+    # narxni 1000 marta katta qilib ko'rsatgan (masalan 4366.10 o'rniga
+    # 4366100.00), natijada narx har doim barcha TP darajalaridan katta
+    # bo'lib chiqib, BARCHA checkpoint'lar birinchi tick'dayoq birdan
+    # "o'tilgan" deb hisoblangan — bu butun trailing tizimining asosiy,
+    # yashirin xatosi edi.
+    divisor = 100000
     with _latest_bid_ask_lock:
         _latest_bid_ask[symbol_id] = (bid / divisor, ask / divisor)
 
@@ -142,7 +151,9 @@ def _on_spot_price(symbol_id: int, raw_bid: int) -> None:
     global _symbol_info, _price_feed_ever_received
     if _symbol_info is None:
         return
-    real_price = raw_bid / (10 ** _symbol_info.digits)
+    # MUHIM TUZATISH: xuddi yuqoridagi kabi — 1e5 fiksirlangan shkala,
+    # digits'ga bog'liq emas.
+    real_price = raw_bid / 100000
     with _latest_prices_lock:
         _latest_prices[symbol_id] = real_price
         _latest_price_timestamps[symbol_id] = time.time()
