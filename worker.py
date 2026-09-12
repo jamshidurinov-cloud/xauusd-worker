@@ -533,9 +533,19 @@ def _get_current_price(symbol_id: int) -> Optional[float]:
         return _latest_prices.get(symbol_id)
 
 
-def trailing_loop(interval_seconds: int = 60) -> None:
+def trailing_loop(interval_seconds: int = 30) -> None:
+    # MUHIM: 60 -> 30 soniyaga tushirildi. Checkpoint aniqlashning o'ziga
+    # ta'sir qilmaydi (bu allaqachon har bir tick'da, mustaqil ravishda
+    # `update_best_price()` orqali amalga oshadi — yuqoriga qarang).
+    # Bu faqat "checkpoint o'tilgach, yangi SL/TP broker'da qachon jismonan
+    # amalda bo'lishi"ni tezlashtiradi. Xavfsiz, chunki amend endi (yuqoridagi
+    # tuzatishdan keyin) broker tasdiqlashini kutadi va faqat shundan keyin
+    # holatni yangilaydi. RECONCILE_EVERY_N_CYCLES ATAYLAB 5'da qoldirilgan
+    # (Jamshid qarori) — demak reconcile endi ~5 daqiqa o'rniga ~2.5
+    # daqiqada bir ishlaydi; bu cTrader so'rov chegarasiga yaqinlashtirmaydi
+    # (hozircha atigi 1 ta ochiq pozitsiya, so'rov chastotasi juda past).
     logger.info("Trailing sikli ishga tushdi (har %s soniyada)", interval_seconds)
-    RECONCILE_EVERY_N_CYCLES = 5  # taxminan har 5 daqiqada bir (5 x 60s)
+    RECONCILE_EVERY_N_CYCLES = 5  # ~2.5 daqiqada bir (5 x 30s) — ataylab shunday qoldirildi
     cycle_count = 0
     while True:
         try:
@@ -681,22 +691,72 @@ def _run_trailing_check_once() -> None:
             )
             continue  # pending_broker_sync=True holicha qoladi
 
-        client.amend_position_sl_tp(
+        # MUHIM TUZATISH (xavfsizlik): avval `amend_position_sl_tp`
+        # chaqirilgach, DARHOL (broker javobini kutmasdan) muvaffaqiyatli
+        # deb hisoblanardi — `pending_broker_sync=False` va risk%
+        # yangilanardi. Bu — `handle_new_signal()`dagi (yangi order
+        # ochishdagi) XAVFSIZ naqshga ZID edi, u yerda broker javobi
+        # HAQIQATAN HAM kutiladi. Endi bu yerda ham xuddi shunday: broker
+        # tasdiqlashini (yoki rad etishini) kutib, FAQAT haqiqiy
+        # tasdiqlangandan keyin holat yangilanadi. Agar broker rad etsa
+        # yoki javob kelmasa — `pending_broker_sync=True` HOLICHA QOLADI,
+        # keyingi siklda avtomatik qayta uriniladi (xotiradagi
+        # current_sl/current_tp va broker'dagi haqiqiy qiymat orasida
+        # nomuvofiqlik yuzaga kelmasligi uchun).
+        amend_deferred = client.amend_position_sl_tp(
             position_id=pos.position_id,
             sl_price=candidate_sl,
             tp_price=candidate_tp,
         )
+
+        amend_done = threading.Event()
+        amend_result: dict = {}
+
+        def _on_amend_confirmed(extracted, _pos_id=pos.position_id):
+            amend_result["ok"] = True
+            amend_done.set()
+            return extracted
+
+        def _on_amend_failed(failure, _pos_id=pos.position_id):
+            amend_result["ok"] = False
+            amend_result["error"] = str(failure)
+            amend_done.set()
+            # `None` qaytaramiz — Twisted'ga "xato ushlandi, boshqa hech
+            # kim ushlamagani haqida ogohlantirish (Unhandled error in
+            # Deferred) kerak emas" deb aytish uchun.
+            return None
+
+        amend_deferred.addCallback(_on_amend_confirmed)
+        amend_deferred.addErrback(_on_amend_failed)
+
+        if not amend_done.wait(timeout=8):
+            logger.warning(
+                "Pozitsiya %s: SL/TP amend 8s ichida javob bermadi — "
+                "pending_broker_sync=True saqlanadi, keyingi siklda "
+                "qayta uriniladi.",
+                pos.position_id,
+            )
+            continue  # pending_broker_sync=True holicha qoladi
+
+        if not amend_result.get("ok"):
+            logger.warning(
+                "Pozitsiya %s: SL/TP amend RAD ETILDI/XATO (%s) — "
+                "pending_broker_sync=True saqlanadi, keyingi siklda "
+                "qayta uriniladi.",
+                pos.position_id,
+                amend_result.get("error"),
+            )
+            continue  # pending_broker_sync=True holicha qoladi
+
         logger.info(
-            "TRAILING AMALGA OSHIRILDI (xavfsizlik tekshiruvidan o'tdi): "
-            "pos=%s SL=%s TP=%s",
+            "TRAILING AMALGA OSHIRILDI (xavfsizlik tekshiruvidan o'tdi, "
+            "broker TASDIQLADI): pos=%s SL=%s TP=%s",
             pos.position_id,
             candidate_sl,
             candidate_tp,
         )
 
-        # Faqat MUVAFFAQIYATLI (xavfsizlik tekshiruvidan o'tgan) yuborishdan
-        # keyin risk% yangilanadi — avval xato holatda ham "0%" deb
-        # belgilab qo'yish xavfi bor edi, endi bu tuzatildi.
+        # Faqat BROKER HAQIQATAN HAM TASDIQLAGANDAN keyin risk% yangilanadi.
         if candidate_sl is not None:
             dynamic_risk = _compute_dynamic_risk_percent(pos, candidate_sl)
             risk_manager.update_position_risk(str(pos.position_id), dynamic_risk)
