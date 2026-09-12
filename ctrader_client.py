@@ -347,8 +347,17 @@ class CTraderClient:
                 f"{symbol_names}"
             )
 
-    def _send_and_await(self, request, callback) -> None:
-        deferred = self._client.send(request)
+    def _send_and_await(self, request, callback, response_timeout: float = 5.0) -> None:
+        # response_timeout — ctrader-open-api kutubxonasining ICHKI Deferred
+        # timeout'i (standart holatda 5s, kutubxona ichida qattiq kodlangan).
+        # Bu ulanish/auth sozlamalariga (Client konstruktoriga) UMUMAN
+        # tegmaydi — faqat shu BITTA so'rovga tegishli, kutubxonaning
+        # o'zi taqdim etgan rasmiy parametr orqali (`send(..., 
+        # responseTimeoutInSeconds=...)`) uzatiladi. Default=5.0 — hozirgi
+        # ishlab turgan barcha boshqa so'rovlar (auth, order, balance va h.k.)
+        # uchun avvalgi xatti-harakat AYNAN saqlanadi, faqat chaqiruvchi
+        # aniq boshqacha qiymat uzatgandagina o'zgaradi.
+        deferred = self._client.send(request, responseTimeoutInSeconds=response_timeout)
 
         def _on_success(response):
             try:
@@ -667,7 +676,17 @@ class CTraderClient:
         req.count = count
         req.toTimestamp = int(time.time() * 1000)
 
-        self._send_and_await(req, _on_trendbars)
+        # MUHIM TUZATISH: avval kutubxonaning ICHKI standart 5s Deferred
+        # timeout'i ishlatilgan edi (chunki _send_and_await'ga
+        # response_timeout uzatilmagan bo'lsa, default=5.0 qo'llanadi),
+        # bu esa pastdagi 15s (yoki undan uzunroq) tashqi `timeout` bilan
+        # mos kelmagan — trendbar javobi 5 soniyadan ko'proq vaqt olganda,
+        # kutubxona o'zi CHAQIRUVCHI TASHQI TIMEOUT YETMASDAN OLDIN
+        # Deferred'ni bekor qilib, TimeoutError bilan xato qaytargan.
+        # Endi ichki timeout tashqi `timeout` bilan BIR XIL qiymatga
+        # tenglashtirildi — faqat shu so'rov uchun, boshqa metodlarga
+        # (auth, order, balance) tegmaydi.
+        self._send_and_await(req, _on_trendbars, response_timeout=timeout)
 
         if not done.wait(timeout=timeout):
             raise CTraderError(f"Trendbar so'rovi {timeout}s ichida javob bermadi")
