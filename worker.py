@@ -731,6 +731,20 @@ app.register_blueprint(
     )
 )
 
+# /debug/balance, /debug/positions, /debug/symbol — botni asosiy oqimga
+# ulashdan oldin cTrader'dan kelayotgan ma'lumotni tashqaridan (curl bilan)
+# tekshirish uchun, FAQAT-O'QISH endpoint'lari. market_data bilan bir xil
+# naqshda, mavjud `client` obyektidan foydalanadi — yangi ulanish yo'q.
+from debug_data import init_debug_data  # noqa: E402  (pastda joylashuvi ataylab)
+
+app.register_blueprint(
+    init_debug_data(
+        client=client,
+        get_symbol_info=lambda: _symbol_info,
+        is_authorized=_is_authorized,
+    )
+)
+
 
 @app.route("/signal", methods=["POST"])
 def receive_signal():
