@@ -625,17 +625,27 @@ class CTraderClient:
         cTrader odatda bitta so'rovda shuncha bergacha ruxsat beradi).
 
         MUHIM — narx kodlash formati: cTrader trendbar'da narxlar "low"
-        (asosiy, butun sonda, digits'ga ko'ra masshtablangan) va undan
-        FARQ (delta) sifatida kodlangan open/high/close qiymatlari bilan
-        keladi:
-            haqiqiy_low   = trendbar.low / 10**digits
-            haqiqiy_open  = (trendbar.low + trendbar.deltaOpen) / 10**digits
-            haqiqiy_high  = (trendbar.low + trendbar.deltaHigh) / 10**digits
-            haqiqiy_close = (trendbar.low + trendbar.deltaClose) / 10**digits
-        Bu — hujjatlashtirilgan standart format, lekin BIRINCHI HAQIQIY
-        SO'ROVDAN KEYIN natijani (masalan cTrader terminalidagi narx bilan
-        solishtirib) tasdiqlash tavsiya etiladi — kutubxona versiyasiga
-        qarab farq qilishi RISKI bor.
+        (asosiy, butun sonda) va undan FARQ (delta) sifatida kodlangan
+        open/high/close qiymatlari bilan keladi:
+            haqiqiy_low   = trendbar.low / 100000
+            haqiqiy_open  = (trendbar.low + trendbar.deltaOpen) / 100000
+            haqiqiy_high  = (trendbar.low + trendbar.deltaHigh) / 100000
+            haqiqiy_close = (trendbar.low + trendbar.deltaClose) / 100000
+
+        MUHIM TUZATISH (real so'rov bilan tasdiqlandi): avval bu yerda
+        `10**digits` ishlatilgan edi (izohda "tasdiqlash tavsiya etiladi"
+        deb ogohlantirilgan holat — aynan shu tekshiruv paytida xato
+        topildi). Haqiqiy `/candles` so'rovi natijasi `/price`dagi jonli
+        narx bilan solishtirilganda, narx ANIQ 1000 MARTA KATTA chiqishi
+        aniqlandi (masalan close=4347810.0, aslida 4347.81 bo'lishi kerak
+        edi). Sabab: XAUUSD uchun broker digits=2 qaytaradi, `10**2=100`
+        bilan bo'lish esa noto'g'ri — cTrader trendbar narxlari, xuddi
+        ProtoOASpotEvent (jonli narx) kabi, DOIM fiksirlangan 1e5 (100000)
+        shkalada keladi, `digits`ga BOG'LIQ EMAS (bu — worker.py'da spot
+        narx uchun avval topilgan va tuzatilgan xatoning xuddi shu turi,
+        faqat tarixiy sham qismida). `digits` esa faqat NATIJANI
+        YAXLITLASH (round) uchun ishlatiladi, masshtablash uchun emas —
+        bu market_data.py'da o'zgarishsiz qoladi.
         """
         period_map = {"1min": ProtoOATrendbarPeriod.M1, "5min": ProtoOATrendbarPeriod.M5}
         if timeframe not in period_map:
@@ -649,10 +659,12 @@ class CTraderClient:
         def _on_trendbars(extracted):
             bars = []
             for tb in extracted.trendbar:
-                low = tb.low / (10 ** digits)
-                open_ = (tb.low + tb.deltaOpen) / (10 ** digits)
-                high = (tb.low + tb.deltaHigh) / (10 ** digits)
-                close = (tb.low + tb.deltaClose) / (10 ** digits)
+                # DIQQAT: 100000 — FIKSIRLANGAN shkala (digits emas). Yuqoridagi
+                # docstring'dagi "MUHIM TUZATISH" izohiga qarang.
+                low = tb.low / 100000
+                open_ = (tb.low + tb.deltaOpen) / 100000
+                high = (tb.low + tb.deltaHigh) / 100000
+                close = (tb.low + tb.deltaClose) / 100000
                 bars.append(
                     {
                         "timestamp_min": tb.utcTimestampInMinutes,
