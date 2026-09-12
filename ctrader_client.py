@@ -458,18 +458,40 @@ class CTraderClient:
         )
 
         def _on_amend_success(response):
+            # MUHIM TUZATISH: avval bu yerda HAR QANDAY javob (hatto
+            # broker RAD ETGAN ProtoOAErrorRes bo'lsa ham) "muvaffaqiyat"
+            # sifatida faqat LOG qilinardi, chaqiruvchiga (worker.py) esa
+            # hech narsa qaytarilmasdi. Endi: agar javob aslida xato
+            # (ProtoOAErrorRes) bo'lsa, CTraderError ko'tariladi — Twisted
+            # buni AVTOMATIK RAVISHDA errback zanjiriga yo'naltiradi
+            # (worker.py o'zining qo'shimcha errback'ini ulab, buni
+            # ushlab, pending_broker_sync=True holicha qoldirishi uchun).
+            # Muvaffaqiyat bo'lsa, `extracted`ni qaytaramiz — shunda
+            # worker.py zanjirdagi keyingi callback orqali buni ko'rib,
+            # "haqiqatan ham tasdiqlandi" deb bilishi mumkin.
             try:
                 extracted = Protobuf.extract(response)
-                logger.info(
-                    "SL/TP AMEND JAVOBI KELDI: position_id=%s javob_turi=%s tarkibi=%s",
-                    position_id,
-                    type(extracted).__name__,
-                    extracted,
-                )
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     "SL/TP amend javobini o'qishda xato: position_id=%s", position_id
                 )
+                raise CTraderError(f"Amend javobini o'qishda xato: {exc}") from exc
+
+            type_name = type(extracted).__name__
+            if type_name == "ProtoOAErrorRes":
+                logger.error(
+                    "SL/TP AMEND BROKER TOMONIDAN RAD ETILDI: position_id=%s xato=%s",
+                    position_id,
+                    extracted,
+                )
+                raise CTraderError(f"Broker rad etdi: {extracted}")
+
+            logger.info(
+                "SL/TP AMEND JAVOBI KELDI (tasdiqlandi): position_id=%s javob_turi=%s",
+                position_id,
+                type_name,
+            )
+            return extracted
 
         def _on_amend_error(failure):
             logger.error(
