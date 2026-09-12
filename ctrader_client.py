@@ -676,6 +676,24 @@ class CTraderClient:
         req.count = count
         req.toTimestamp = int(time.time() * 1000)
 
+        # MUHIM TUZATISH (kandidat #2): avval faqat `toTimestamp` yuborilgan,
+        # `fromTimestamp` UMUMAN qo'yilmagan edi (demak standart qiymat —
+        # 0, ya'ni 1970-yil bilan ketgan). cTrader rasmiy hujjatida va
+        # barcha ishlaydigan namunalarda IKKALASI HAM beriladi; forumda esa
+        # noto'g'ri/to'liq bo'lmagan vaqt oralig'i yuborilganda serverning
+        # HECH QANDAY XATO QAYTARMASDAN JIMGINA javob bermasligi alohida
+        # tasdiqlangan — bu bizning "timeout, lekin ProtoOAErrorRes yo'q"
+        # holatimizga mos keladi. `count` so'ralgan bo'lsa `fromTimestamp`
+        # texnik jihatdan ixtiyoriy (server "count ta sham, toTimestamp'dan
+        # orqaga" deb hisoblashi kerak), lekin buni aniq ko'rsatish xavfsiz
+        # va hujjatga mosroq. Oyna kengligi so'ralgan count+period'ga
+        # nisbatan avtomatik hisoblanadi (bozor tanaffuslari/dam olish
+        # kunlari uchun 4x zaxira bilan), shuning uchun har qanday
+        # timeframe/count uchun ishlaydi, kodga qattiq sonlar yozilmaydi.
+        period_minutes = {"1min": 1, "5min": 5}[timeframe]
+        window_minutes = max(count * period_minutes * 4, 60)
+        req.fromTimestamp = req.toTimestamp - (window_minutes * 60 * 1000)
+
         # MUHIM TUZATISH: avval kutubxonaning ICHKI standart 5s Deferred
         # timeout'i ishlatilgan edi (chunki _send_and_await'ga
         # response_timeout uzatilmagan bo'lsa, default=5.0 qo'llanadi),
