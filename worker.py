@@ -769,6 +769,38 @@ def _run_trailing_check_once() -> None:
 # ----------------------------------------------------------------------
 app = Flask(__name__)
 
+# MUHIM (ixtiyoriy, standart holatda O'CHIQ - Jamshid so'roviga ko'ra):
+# `/candles`, `/price` kabi tez-tez chaqiriladigan, muvaffaqiyatli (2xx)
+# so'rovlar werkzeug'ning avtomatik access-log qatorlarini "to'ldirib"
+# yuboradi, bu esa muhim voqealarni (trailing, xato) log'da topishni
+# qiyinlashtiradi. Bu — Render'ning Environment Variables bo'limida
+# `HIDE_SUCCESSFUL_ACCESS_LOGS=true` qo'yib, KOD O'ZGARTIRMASDAN, faqat
+# xizmatni qayta ishga tushirib yoqiladigan/o'chiriladigan sozlama.
+# STANDART HOLAT ("false" yoki sozlanmagan) — HECH NARSA O'ZGARMAYDI,
+# barcha so'rovlar avvalgidek log qilinadi.
+_HIDE_SUCCESS_LOGS = os.environ.get("HIDE_SUCCESSFUL_ACCESS_LOGS", "false").lower() == "true"
+
+if _HIDE_SUCCESS_LOGS:
+    # werkzeug'ning HAR BIR so'rovni (muvaffaqiyatli ham, xato ham) INFO
+    # darajasida avtomatik log qilishini o'chiramiz...
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
+    # ...va o'rniga, FAQAT xato (4xx/5xx) javoblarni o'zimiz, alohida
+    # log qilamiz - shunday qilib xatolar HECH QACHON yo'qolmaydi,
+    # faqat muvaffaqiyatli (200) so'rovlar jimgina o'tadi.
+    @app.after_request
+    def _log_only_errors(response):
+        if response.status_code >= 400:
+            logger.warning(
+                "%s %s -> %s", request.method, request.path, response.status_code
+            )
+        return response
+
+    logger.warning(
+        "HIDE_SUCCESSFUL_ACCESS_LOGS=true: muvaffaqiyatli (2xx) so'rovlar "
+        "endi log'da ko'rsatilmaydi, faqat xatolar (4xx/5xx) ko'rinadi."
+    )
+
 
 def _is_authorized(req) -> bool:
     auth_header = req.headers.get("Authorization", "")
