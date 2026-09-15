@@ -107,6 +107,16 @@ logger.warning(
 # ----------------------------------------------------------------------
 risk_manager = RiskManager(RISK_CONFIG)
 trade_manager = TradeManager()
+# MUHIM (2026-09-15, Jamshid topgan xato): kunlik zarar circuit breaker
+# (`risk_manager.register_realized_pnl_percent`) ILGARI HECH QAYERDA
+# chaqirilmagan edi — shuning uchun -20% kunlik limit AMALDA HECH QACHON
+# ishga tushmasdi. Endi balans-asosli usul bilan tuzatildi (pastda,
+# `initialize_ctrader()` va `_on_execution_event()`da): pozitsiya
+# yopilishidan oldingi va keyingi balans solishtiriladi, farq
+# `register_realized_pnl_percent()`ga uzatiladi. `risk_manager.py`ning
+# o'zi O'ZGARTIRILMAGAN - u allaqachon to'g'ri yozilgan edi, faqat
+# chaqirilmagan edi.
+_last_known_balance: Optional[float] = None
 _latest_prices: dict[int, float] = {}
 _latest_price_timestamps: dict[int, float] = {}
 _latest_prices_lock = threading.Lock()
@@ -199,6 +209,40 @@ def _on_execution_event(event) -> None:
                     "kuzatuvdan va risk hisobidan olib tashlandi",
                     pid,
                 )
+
+                # MUHIM (2026-09-15, Jamshid topgan xato): shu yergacha
+                # faqat "ochiq risk" ro'yxatidan olib tashlangan edi -
+                # pozitsiyaning HAQIQIY natijasi (foyda/zarar) kunlik
+                # circuit breaker hisobiga HECH QACHON qo'shilmasdi. Endi:
+                # yopilishdan oldingi (_last_known_balance) va keyingi
+                # (hozirgi) balans solishtiriladi - farq (%) mavjud,
+                # o'zgarmagan `register_realized_pnl_percent()`ga uzatiladi
+                # (u funksiya faqat ZARARNI (`pnl_percent < 0`) kunlik
+                # hisobga qo'shadi, g'alabani e'tiborsiz qoldiradi - bu
+                # xatti-harakat o'zgarmadi).
+                global _last_known_balance
+                try:
+                    current_balance = client.get_account_balance(timeout=10)
+                    if _last_known_balance and _last_known_balance > 0:
+                        pnl_percent = (
+                            (current_balance - _last_known_balance)
+                            / _last_known_balance * 100
+                        )
+                        risk_manager.register_realized_pnl_percent(pnl_percent)
+                        logger.info(
+                            "Pozitsiya %s natijasi kunlik hisobga qo'shildi: "
+                            "%.2f%% (balans %.2f -> %.2f)",
+                            pid, pnl_percent, _last_known_balance, current_balance,
+                        )
+                    _last_known_balance = current_balance
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "Pozitsiya %s yopilgach balansni olib, kunlik zarar "
+                        "hisobini yangilab bo'lmadi - _last_known_balance "
+                        "eskirgan holicha qoladi (keyingi yopilishda "
+                        "solishtirish noaniq bo'lishi mumkin)",
+                        pid,
+                    )
     except Exception:  # noqa: BLE001
         logger.exception("Execution event orqali yopiq pozitsiyani aniqlashda xato")
 
@@ -234,6 +278,24 @@ def initialize_ctrader() -> None:
 
     client.subscribe_spots([_symbol_info.symbol_id])
     _recover_orphan_positions()
+
+    # MUHIM (2026-09-15): kunlik zarar hisobi uchun boshlang'ich balans
+    # (pastda `_on_execution_event()` shu bilan solishtiradi). Xato bo'lsa
+    # ham worker ishga tushishida to'xtamaydi (balans keyingi pozitsiya
+    # yopilishida qayta so'raladi) - lekin bu holatda kunlik hisob birinchi
+    # savdogacha noaniq qoladi, shuning uchun xato aniq log qilinadi.
+    global _last_known_balance
+    try:
+        _last_known_balance = client.get_account_balance(timeout=10)
+        logger.info(
+            "Kunlik zarar hisobi uchun boshlang'ich balans o'rnatildi: %.2f",
+            _last_known_balance,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Boshlang'ich balansni olib bo'lmadi - kunlik zarar hisobi "
+            "birinchi pozitsiya yopilguncha noaniq bo'ladi"
+        )
 
 
 def _recover_orphan_positions() -> None:
