@@ -57,6 +57,12 @@ class ManagedPosition:
     volume_units: int
     risk_percent: float
 
+    # MUHIM (2026-09-15): "smc" (7-bosqichli, standart) yoki "ob_fvg"
+    # (YANGI, sodda: faqat TP2->breakeven, TP butun vaqt QATTIQ TP3'da
+    # qotirilgan - boshqa hech qanday checkpoint ishlamaydi). Kelajakda
+    # yangi profil qo'shish uchun ham shu yerga kengaytiriladi.
+    profile: str = "smc"
+
     current_sl: float = field(init=False)
     current_tp: float = field(init=False)
 
@@ -93,7 +99,11 @@ class ManagedPosition:
 
     def __post_init__(self):
         self.current_sl = self.initial_sl
-        self.current_tp = self.tp5  # boshlang'ich TP har doim TP5
+        # Boshlang'ich TP profilga bog'liq: "smc" -> TP5, "ob_fvg" -> TP3
+        # (YANGI, 2026-09-15: OB/FVG uchun TP boshidanoq QATTIQ TP3'da,
+        # hech qachon "oldinga surilmaydi" - faqat TP2'da SL breakeven'ga
+        # ko'tariladi, xolos).
+        self.current_tp = self.tp3 if self.profile == "ob_fvg" else self.tp5
         self.best_price = self.entry_price  # dastlab, hali hech qayerga bormagan
 
 
@@ -233,69 +243,73 @@ class TradeManager:
                     pos.entry_price,
                 )
 
-            # 2) TP3 -> SL=TP2, TP=TP8 (ikki qadam oldinga)
-            if not pos.tp3_triggered and self._price_reached(pos.side, eval_price, pos.tp3):
-                pos.tp3_triggered = True
-                pos.current_sl = pos.tp2
-                pos.current_tp = pos.tp8
-                any_triggered = True
-                last_reason = "TP3_REACHED_TP_TO_TP8"
-                logger.info(
-                    "Pozitsiya %s: TP3 checkpoint o'tildi. TP -> TP8, SL -> TP2 (%.4f).",
-                    position_id,
-                    pos.tp2,
-                )
+            # 2-6-bosqichlar FAQAT "smc" profili uchun (7-bosqichli zanjir).
+            # "ob_fvg" profili uchun - TP2'dan boshqa hech qanday checkpoint
+            # ishlamaydi (TP butun vaqt qattiq TP3'da qotirilgan qoladi).
+            if pos.profile == "smc":
+                # 2) TP3 -> SL=TP2, TP=TP8 (ikki qadam oldinga)
+                if not pos.tp3_triggered and self._price_reached(pos.side, eval_price, pos.tp3):
+                    pos.tp3_triggered = True
+                    pos.current_sl = pos.tp2
+                    pos.current_tp = pos.tp8
+                    any_triggered = True
+                    last_reason = "TP3_REACHED_TP_TO_TP8"
+                    logger.info(
+                        "Pozitsiya %s: TP3 checkpoint o'tildi. TP -> TP8, SL -> TP2 (%.4f).",
+                        position_id,
+                        pos.tp2,
+                    )
 
-            # 3) TP5 -> SL=TP3, TP=TP10
-            if not pos.tp5_triggered and self._price_reached(pos.side, eval_price, pos.tp5):
-                pos.tp5_triggered = True
-                pos.current_sl = pos.tp3
-                pos.current_tp = pos.tp10
-                any_triggered = True
-                last_reason = "TP5_REACHED_TP_TO_TP10"
-                logger.info(
-                    "Pozitsiya %s: TP5 checkpoint o'tildi. TP -> TP10, SL -> TP3 (%.4f).",
-                    position_id,
-                    pos.tp3,
-                )
+                # 3) TP5 -> SL=TP3, TP=TP10
+                if not pos.tp5_triggered and self._price_reached(pos.side, eval_price, pos.tp5):
+                    pos.tp5_triggered = True
+                    pos.current_sl = pos.tp3
+                    pos.current_tp = pos.tp10
+                    any_triggered = True
+                    last_reason = "TP5_REACHED_TP_TO_TP10"
+                    logger.info(
+                        "Pozitsiya %s: TP5 checkpoint o'tildi. TP -> TP10, SL -> TP3 (%.4f).",
+                        position_id,
+                        pos.tp3,
+                    )
 
-            # 4) TP8 -> SL=TP5, TP=TP12 (bo'shliqni to'ldiruvchi yangi bosqich)
-            if not pos.tp8_triggered and self._price_reached(pos.side, eval_price, pos.tp8):
-                pos.tp8_triggered = True
-                pos.current_sl = pos.tp5
-                pos.current_tp = pos.tp12
-                any_triggered = True
-                last_reason = "TP8_REACHED_TP_TO_TP12"
-                logger.info(
-                    "Pozitsiya %s: TP8 checkpoint o'tildi. TP -> TP12, SL -> TP5 (%.4f).",
-                    position_id,
-                    pos.tp5,
-                )
+                # 4) TP8 -> SL=TP5, TP=TP12 (bo'shliqni to'ldiruvchi yangi bosqich)
+                if not pos.tp8_triggered and self._price_reached(pos.side, eval_price, pos.tp8):
+                    pos.tp8_triggered = True
+                    pos.current_sl = pos.tp5
+                    pos.current_tp = pos.tp12
+                    any_triggered = True
+                    last_reason = "TP8_REACHED_TP_TO_TP12"
+                    logger.info(
+                        "Pozitsiya %s: TP8 checkpoint o'tildi. TP -> TP12, SL -> TP5 (%.4f).",
+                        position_id,
+                        pos.tp5,
+                    )
 
-            # 5) TP10 -> SL=TP8, TP=TP15
-            if not pos.tp10_triggered and self._price_reached(pos.side, eval_price, pos.tp10):
-                pos.tp10_triggered = True
-                pos.current_sl = pos.tp8
-                pos.current_tp = pos.tp15
-                any_triggered = True
-                last_reason = "TP10_REACHED_TP_TO_TP15"
-                logger.info(
-                    "Pozitsiya %s: TP10 checkpoint o'tildi. TP -> TP15, SL -> TP8 (%.4f).",
-                    position_id,
-                    pos.tp8,
-                )
+                # 5) TP10 -> SL=TP8, TP=TP15
+                if not pos.tp10_triggered and self._price_reached(pos.side, eval_price, pos.tp10):
+                    pos.tp10_triggered = True
+                    pos.current_sl = pos.tp8
+                    pos.current_tp = pos.tp15
+                    any_triggered = True
+                    last_reason = "TP10_REACHED_TP_TO_TP15"
+                    logger.info(
+                        "Pozitsiya %s: TP10 checkpoint o'tildi. TP -> TP15, SL -> TP8 (%.4f).",
+                        position_id,
+                        pos.tp8,
+                    )
 
-            # 6) TP12 -> SL=TP10 (TP15 — oxirgi, o'zgarmaydi)
-            if not pos.tp12_triggered and self._price_reached(pos.side, eval_price, pos.tp12):
-                pos.tp12_triggered = True
-                pos.current_sl = pos.tp10
-                any_triggered = True
-                last_reason = "TP12_REACHED_SL_TO_TP10"
-                logger.info(
-                    "Pozitsiya %s: TP12 checkpoint o'tildi. SL -> TP10 (%.4f).",
-                    position_id,
-                    pos.tp10,
-                )
+                # 6) TP12 -> SL=TP10 (TP15 — oxirgi, o'zgarmaydi)
+                if not pos.tp12_triggered and self._price_reached(pos.side, eval_price, pos.tp12):
+                    pos.tp12_triggered = True
+                    pos.current_sl = pos.tp10
+                    any_triggered = True
+                    last_reason = "TP12_REACHED_SL_TO_TP10"
+                    logger.info(
+                        "Pozitsiya %s: TP12 checkpoint o'tildi. SL -> TP10 (%.4f).",
+                        position_id,
+                        pos.tp10,
+                    )
 
             if not any_triggered:
                 return None
