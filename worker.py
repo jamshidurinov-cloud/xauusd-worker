@@ -4,25 +4,25 @@ worker.py
 Butun avtomat-savdo Worker'ining bosh fayli. Ishga tushirilganda:
 
   1) Environment variables'ni o'qiydi va tekshiradi (xato bo'lsa darhol
-     to'xtaydi вЂ” "fail fast", noto'g'ri sozlama bilan jimgina ishlashdan
+     to'xtaydi — "fail fast", noto'g'ri sozlama bilan jimgina ishlashdan
      ko'ra darhol xato berish xavfsizroq).
   2) cTrader'ga ulanadi, ilova va hisob autentifikatsiyasidan o'tadi.
   3) Kerakli symbol (XAUUSD) ma'lumotini (lot_size, digits) yuklaydi.
   4) Broker'dagi mavjud ochiq pozitsiyalarni "reconcile" qiladi (restart'dan
-     keyin holatni tiklash uchun вЂ” MVP versiyada faqat log qiladi, to'liq
+     keyin holatni tiklash uchun — MVP versiyada faqat log qiladi, to'liq
      state-recovery keyingi bosqichda kengaytiriladi).
-  5) Flask HTTP serverini ishga tushiradi вЂ” main.py'dan signal qabul qilish
+  5) Flask HTTP serverini ishga tushiradi — main.py'dan signal qabul qilish
      uchun (`POST /signal`, maxfiy token bilan himoyalangan).
   6) Alohida background thread'da har 1 daqiqada barcha ochiq pozitsiyalarni
      tekshiradigan trailing siklini ishga tushiradi.
 
 XAVFSIZLIK ESLATMASI (DEMO/LIVE):
   DEMO_MODE environment variable ANIQ "true" yoki "false" bo'lishi kerak.
-  Agar noaniq/bo'sh bo'lsa вЂ” dastur ataylab XATO berib to'xtaydi (default
+  Agar noaniq/bo'sh bo'lsa — dastur ataylab XATO berib to'xtaydi (default
   qiymat DEMO emas, chunki "aniq bo'lmagan holatda xavfsiz tomonga og'ish"
   printsipi shu yerda TESKARI ishlaydi: agar kimdir DEMO_MODE'ni unutib
   qoldirsa, dastur "demo deb hisoblab" jim ishlab ketishi ham, "live deb
-  hisoblab" jim ishlab ketishi ham xavfli вЂ” shuning uchun unutilgan holatda
+  hisoblab" jim ishlab ketishi ham xavfli — shuning uchun unutilgan holatda
   umuman ishga tushmasligi kerak).
 """
 
@@ -95,7 +95,7 @@ RISK_CONFIG = RiskConfig(
 
 logger.warning(
     "ISHGA TUSHYAPTI: REJIM = %s | ACCOUNT_ID = %s | SYMBOL = %s",
-    "DEMO" if DEMO_MODE else "!!! LIVE вЂ” HAQIQIY PUL !!!",
+    "DEMO" if DEMO_MODE else "!!! LIVE — HAQIQIY PUL !!!",
     CTRADER_ACCOUNT_ID,
     SYMBOL_NAME,
 )
@@ -113,7 +113,7 @@ _latest_prices_lock = threading.Lock()
 _symbol_info: Optional[SymbolInfo] = None
 _price_feed_ever_received = False
 
-# /price endpoint uchun вЂ” bid VA ask ikkalasi ham kelganda saqlanadi
+# /price endpoint uchun — bid VA ask ikkalasi ham kelganda saqlanadi
 # (asosiy trailing mantig'i faqat bid'ga tayanadi, bu alohida, unga
 # ta'sir qilmaydi).
 _latest_bid_ask: dict[int, tuple] = {}
@@ -121,17 +121,17 @@ _latest_bid_ask_lock = threading.Lock()
 
 
 def _on_spot_price_full(symbol_id: int, bid: int, ask: int) -> None:
-    """/price endpoint uchun вЂ” bid va ask ikkalasini birga saqlaydi."""
+    """/price endpoint uchun — bid va ask ikkalasini birga saqlaydi."""
     if _symbol_info is None:
         return
     # MUHIM TUZATISH: cTrader ProtoOASpotEvent'dagi bid/ask har doim
-    # FIKSIRLANGAN 100000 (1e5) shkalada keladi вЂ” bu symbol.digits'ga
+    # FIKSIRLANGAN 100000 (1e5) shkalada keladi — bu symbol.digits'ga
     # BOG'LIQ EMAS (digits faqat ko'rsatish/yaxlitlash uchun ishlatiladi).
-    # Avval noto'g'ri "10**digits" (masalan 100) ishlatilgan edi вЂ” bu
+    # Avval noto'g'ri "10**digits" (masalan 100) ishlatilgan edi — bu
     # narxni 1000 marta katta qilib ko'rsatgan (masalan 4366.10 o'rniga
     # 4366100.00), natijada narx har doim barcha TP darajalaridan katta
     # bo'lib chiqib, BARCHA checkpoint'lar birinchi tick'dayoq birdan
-    # "o'tilgan" deb hisoblangan вЂ” bu butun trailing tizimining asosiy,
+    # "o'tilgan" deb hisoblangan — bu butun trailing tizimining asosiy,
     # yashirin xatosi edi.
     divisor = 100000
     with _latest_bid_ask_lock:
@@ -139,7 +139,7 @@ def _on_spot_price_full(symbol_id: int, bid: int, ask: int) -> None:
 
 
 def get_latest_bid_ask_for_market_data() -> tuple:
-    """market_data.py uchun вЂ” joriy (bid, ask) juftligini qaytaradi."""
+    """market_data.py uchun — joriy (bid, ask) juftligini qaytaradi."""
     if _symbol_info is None:
         return (None, None)
     with _latest_bid_ask_lock:
@@ -151,7 +151,7 @@ def _on_spot_price(symbol_id: int, raw_bid: int) -> None:
     global _symbol_info, _price_feed_ever_received
     if _symbol_info is None:
         return
-    # MUHIM TUZATISH: xuddi yuqoridagi kabi вЂ” 1e5 fiksirlangan shkala,
+    # MUHIM TUZATISH: xuddi yuqoridagi kabi — 1e5 fiksirlangan shkala,
     # digits'ga bog'liq emas.
     real_price = raw_bid / 100000
     with _latest_prices_lock:
@@ -160,7 +160,7 @@ def _on_spot_price(symbol_id: int, raw_bid: int) -> None:
 
     # MUHIM: har bir yangi tick kelganda (millisekundlarda, 60 soniyalik
     # trailing siklidan MUSTAQIL) barcha ochiq pozitsiyalarning "eng yaxshi
-    # erishilgan narxi" yangilanadi вЂ” shunda narx checkpoint'ga tegib,
+    # erishilgan narxi" yangilanadi — shunda narx checkpoint'ga tegib,
     # keyingi trailing tekshiruvigacha ORQAGA qaytib ketgan bo'lsa ham,
     # checkpoint o'tkazib yuborilmaydi.
     trade_manager.update_best_price(real_price)
@@ -168,7 +168,7 @@ def _on_spot_price(symbol_id: int, raw_bid: int) -> None:
     if not _price_feed_ever_received:
         _price_feed_ever_received = True
         logger.info(
-            "Narx oqimi TASDIQLANDI вЂ” birinchi narx qabul qilindi: symbol_id=%s narx=%s",
+            "Narx oqimi TASDIQLANDI — birinchi narx qabul qilindi: symbol_id=%s narx=%s",
             symbol_id,
             real_price,
         )
@@ -183,7 +183,7 @@ def _on_ctrader_error(message: str) -> None:
 def _on_execution_event(event) -> None:
     logger.info("Execution event qabul qilindi: %s", event)
     # 1-QATLAM: pozitsiya broker tomonidan yopilganini REAL-VAQTDA aniqlash
-    # (SL/TP urilgani, qo'lda yopilgani va h.k.) вЂ” aniqlangan zahoti
+    # (SL/TP urilgani, qo'lda yopilgani va h.k.) — aniqlangan zahoti
     # xotiradan (trade_manager) va risk hisobidan (risk_manager) olib
     # tashlanadi, shunda keyingi signallar noto'g'ri "jami risk to'lgan"
     # deb rad etilmaydi.
@@ -195,7 +195,7 @@ def _on_execution_event(event) -> None:
                 trade_manager.remove_position(pid)
                 risk_manager.unregister_position(str(pid))
                 logger.info(
-                    "Pozitsiya %s YOPILGANI ANIQLANDI (execution event orqali) вЂ” "
+                    "Pozitsiya %s YOPILGANI ANIQLANDI (execution event orqali) — "
                     "kuzatuvdan va risk hisobidan olib tashlandi",
                     pid,
                 )
@@ -240,13 +240,13 @@ def _recover_orphan_positions() -> None:
     """
     Worker ishga tushganda (deploy/restart'dan keyin) broker'da hali ochiq
     turgan, lekin xotirada "yo'qolgan" pozitsiyalarni topib, KUZATUVGA
-    QAYTA QO'SHADI вЂ” faqat risk-hisob va yopilishni aniqlash uchun.
+    QAYTA QO'SHADI — faqat risk-hisob va yopilishni aniqlash uchun.
 
     MUHIM CHEKLOV (ataylab, xavfsizlik uchun): bunday pozitsiyalar uchun
     TP-checkpoint asosidagi SL trailing ISHLAMAYDI, chunki asl TP2-TP15
     darajalari (faqat signal payload'ida bo'lgan) qayta tiklab bo'lmaydi.
     Buni taxmin qilish SL'ni noto'g'ri joyga surib qo'yish xavfini
-    tug'diradi вЂ” shuning uchun "hech narsa qilmaslik" (faqat kuzatish)
+    tug'diradi — shuning uchun "hech narsa qilmaslik" (faqat kuzatish)
     "noto'g'ri taxmin qilish"dan XAVFSIZROQ deb hisoblanadi.
     """
     if _symbol_info is None:
@@ -276,7 +276,7 @@ def _recover_orphan_positions() -> None:
 
         if current_sl is None:
             logger.warning(
-                "Pozitsiya %s broker'da SL'siz topildi вЂ” xavfsizlik uchun "
+                "Pozitsiya %s broker'da SL'siz topildi — xavfsizlik uchun "
                 "tiklanmaydi, qo'lda tekshirish tavsiya etiladi (cTrader "
                 "terminalida)",
                 bp["position_id"],
@@ -285,7 +285,7 @@ def _recover_orphan_positions() -> None:
 
         side_enum = TradeSide.BUY if bp["side"] == "BUY" else TradeSide.SELL
 
-        # tp2..tp15 uchun aniq qiymat yo'q вЂ” barchasiga joriy TP qo'yamiz.
+        # tp2..tp15 uchun aniq qiymat yo'q — barchasiga joriy TP qo'yamiz.
         # Bu qiymatlar ishlatilmaydi ham (trailing_enabled=False bo'lgani
         # uchun evaluate() darhol None qaytaradi), shunchaki dataclass
         # maydonini to'ldirish uchun.
@@ -310,7 +310,7 @@ def _recover_orphan_positions() -> None:
         )
         trade_manager.add_position(managed)
 
-        # Risk% ni joriy SL masofasidan hisoblaymiz (bu вЂ” haqiqiy joriy
+        # Risk% ni joriy SL masofasidan hisoblaymiz (bu — haqiqiy joriy
         # xavf, "boshlang'ich" emas, chunki boshlang'ich ma'lumot yo'qolgan).
         try:
             balance = client.get_account_balance(timeout=10)
@@ -321,7 +321,7 @@ def _recover_orphan_positions() -> None:
             risk_percent = (risk_amount / balance) * 100.0 if balance > 0 else 0.0
         except Exception:  # noqa: BLE001
             logger.exception(
-                "Pozitsiya %s uchun risk% hisoblab bo'lmadi вЂ” 0%% deb belgilanadi",
+                "Pozitsiya %s uchun risk% hisoblab bo'lmadi — 0%% deb belgilanadi",
                 bp["position_id"],
             )
             risk_percent = 0.0
@@ -330,7 +330,7 @@ def _recover_orphan_positions() -> None:
 
         logger.warning(
             "TIKLANDI (orphan): pos=%s %s entry=%s SL=%s TP=%s risk=%.2f%% "
-            "вЂ” TP-CHECKPOINT TRAILING O'CHIRILGAN (faqat kuzatuv/risk-hisob ishlaydi)",
+            "— TP-CHECKPOINT TRAILING O'CHIRILGAN (faqat kuzatuv/risk-hisob ishlaydi)",
             bp["position_id"],
             bp["side"],
             entry_price,
@@ -364,16 +364,21 @@ def handle_new_signal(payload: dict) -> dict:
         tp5 = float(payload["tp5"])
         tp10 = float(payload["tp10"])
         tp15 = float(payload["tp15"])
-        # tp8/tp12 вЂ” yangi maydonlar (TP5-TP10 orasidagi katta bo'shliqni
+        # tp8/tp12 — yangi maydonlar (TP5-TP10 orasidagi katta bo'shliqni
         # kamaytirish uchun). ORQAGA MOSLIK: agar main.py hali eski
         # formatda (tp8/tp12'siz) signal yuborsa, xavfsiz standart qiymat
-        # sifatida mos ravishda tp10/tp15'ga tenglashtiriladi вЂ” bu holda
+        # sifatida mos ravishda tp10/tp15'ga tenglashtiriladi — bu holda
         # checkpoint zanjiri avtomatik ravishda eski 5-bosqichli xatti-
         # harakatga "qulaydi" (tp8=tp10 bo'lgani uchun ular deyarli bir
         # vaqtda ishga tushadi, natija amalda eskisiga teng bo'ladi).
         tp8 = float(payload.get("tp8", tp10))
         tp12 = float(payload.get("tp12", tp15))
         event_key = str(payload.get("event_key", ""))
+        # MUHIM (2026-09-15): "profile" - qaysi trailing mexanizmi ishlatilishi
+        # kerakligini bildiradi ("smc" - standart 7-bosqichli, "ob_fvg" -
+        # YANGI, sodda: TP qattiq TP3'da, faqat TP2'da SL breakeven'ga
+        # ko'tariladi). main.py yubormasa - xavfsiz standart "smc".
+        profile = str(payload.get("profile", "smc"))
     except (KeyError, ValueError, TypeError) as exc:
         logger.error("Signal payload noto'g'ri formatda: %s", exc)
         return {"status": "error", "detail": f"Noto'g'ri payload: {exc}"}
@@ -382,16 +387,16 @@ def handle_new_signal(payload: dict) -> dict:
         return {"status": "error", "detail": f"Noma'lum direction: {direction}"}
 
     # pip_value_per_lot: XAUUSD uchun 1.0 lot = 100 untsiya (broker odatiy
-    # standarti). symbol_info.lot_size (masalan 10000) вЂ” bu cTrader'ning
+    # standarti). symbol_info.lot_size (masalan 10000) — bu cTrader'ning
     # VOLUME MAYDONI uchun ICHKI MASSHTABLANGAN birligi (0.01 lot->100 unit
     # yuborish uchun ishlatiladi, bu TO'G'RI), lekin haqiqiy $ hisob-kitobida
-    # ishlatib bo'lmaydi вЂ” shuning uchun 100'ga bo'linadi (cTrader har doim
+    # ishlatib bo'lmaydi — shuning uchun 100'ga bo'linadi (cTrader har doim
     # shu birlikni 100x masshtabda beradi). BU QIYMATNI HAQIQIY TEST ORDER
     # BILAN QAYTA TASDIQLASH TAVSIYA ETILADI.
     pip_value_per_lot = float(_symbol_info.lot_size) / 100.0
 
     # Broker faqat symbol.digits (XAUUSD uchun odatda 2) gacha o'nlik xona
-    # qabul qiladi вЂ” Python hisob-kitoblaridan kelgan uzun o'nlik sonlarni
+    # qabul qiladi — Python hisob-kitoblaridan kelgan uzun o'nlik sonlarni
     # (masalan 4388.451850000003) yaxlitlab yuborish SHART, aks holda
     # broker "INVALID_REQUEST" bilan rad etadi.
     digits = _symbol_info.digits
@@ -425,12 +430,16 @@ def handle_new_signal(payload: dict) -> dict:
 
     side_enum = TradeSide.BUY if direction == "BUY" else TradeSide.SELL
 
+    # Boshlang'ich broker TP - profilga bog'liq: "smc" -> TP5 (standart),
+    # "ob_fvg" -> TP3 (YANGI, qattiq, hech qachon o'zgarmaydi).
+    initial_broker_tp = tp3 if profile == "ob_fvg" else tp5
+
     deferred = client.send_market_order(
         symbol_id=_symbol_info.symbol_id,
         direction=direction,
         volume_in_units=volume_units,
         sl_price=sl_price,
-        tp_price=tp5,
+        tp_price=initial_broker_tp,
         label=event_key or "smc-auto",
         comment=f"risk={sizing.real_risk_percent:.2f}%",
     )
@@ -446,7 +455,7 @@ def handle_new_signal(payload: dict) -> dict:
             # Turli javob tuzilmalarida positionId turli joyda bo'lishi
             # mumkin (ExecutionEvent'ning versiyasiga qarab). Barcha
             # mumkin bo'lgan joylarni tekshirib, birinchi NOL BO'LMAGAN
-            # (haqiqiy) qiymatni olamiz вЂ” proto3'da 0 "o'rnatilmagan"
+            # (haqiqiy) qiymatni olamiz — proto3'da 0 "o'rnatilmagan"
             # degani, shuning uchun 0'ni haqiqiy ID sifatida qabul qilmaymiz.
             candidates = []
             if hasattr(extracted, "position") and extracted.HasField("position"):
@@ -482,7 +491,7 @@ def handle_new_signal(payload: dict) -> dict:
     if position_id is None:
         logger.error(
             "Order yuborildi, lekin position_id javobda topilmadi. Xom javob: %s "
-            "вЂ” reconcile_open_positions() orqali qo'lda tekshirish tavsiya etiladi",
+            "— reconcile_open_positions() orqali qo'lda tekshirish tavsiya etiladi",
             result_holder.get("raw_response", "(yo'q)"),
         )
         return {
@@ -505,6 +514,7 @@ def handle_new_signal(payload: dict) -> dict:
         tp15=tp15,
         volume_units=volume_units,
         risk_percent=sizing.real_risk_percent,
+        profile=profile,
     )
     trade_manager.add_position(managed)
     risk_manager.register_open_position(str(position_id), sizing.real_risk_percent)
@@ -536,16 +546,16 @@ def _get_current_price(symbol_id: int) -> Optional[float]:
 def trailing_loop(interval_seconds: int = 30) -> None:
     # MUHIM: 60 -> 30 soniyaga tushirildi. Checkpoint aniqlashning o'ziga
     # ta'sir qilmaydi (bu allaqachon har bir tick'da, mustaqil ravishda
-    # `update_best_price()` orqali amalga oshadi вЂ” yuqoriga qarang).
+    # `update_best_price()` orqali amalga oshadi — yuqoriga qarang).
     # Bu faqat "checkpoint o'tilgach, yangi SL/TP broker'da qachon jismonan
     # amalda bo'lishi"ni tezlashtiradi. Xavfsiz, chunki amend endi (yuqoridagi
     # tuzatishdan keyin) broker tasdiqlashini kutadi va faqat shundan keyin
     # holatni yangilaydi. RECONCILE_EVERY_N_CYCLES ATAYLAB 5'da qoldirilgan
-    # (Jamshid qarori) вЂ” demak reconcile endi ~5 daqiqa o'rniga ~2.5
+    # (Jamshid qarori) — demak reconcile endi ~5 daqiqa o'rniga ~2.5
     # daqiqada bir ishlaydi; bu cTrader so'rov chegarasiga yaqinlashtirmaydi
     # (hozircha atigi 1 ta ochiq pozitsiya, so'rov chastotasi juda past).
     logger.info("Trailing sikli ishga tushdi (har %s soniyada)", interval_seconds)
-    RECONCILE_EVERY_N_CYCLES = 5  # ~2.5 daqiqada bir (5 x 30s) вЂ” ataylab shunday qoldirildi
+    RECONCILE_EVERY_N_CYCLES = 5  # ~2.5 daqiqada bir (5 x 30s) — ataylab shunday qoldirildi
     cycle_count = 0
     while True:
         try:
@@ -577,7 +587,7 @@ def _reconcile_positions_with_broker() -> None:
         if pos.position_id not in broker_open_ids:
             logger.warning(
                 "RECONCILE: pozitsiya %s xotirada 'ochiq' turibdi, lekin broker'da "
-                "endi yo'q вЂ” kuzatuvdan va risk hisobidan olib tashlanmoqda",
+                "endi yo'q — kuzatuvdan va risk hisobidan olib tashlanmoqda",
                 pos.position_id,
             )
             trade_manager.remove_position(pos.position_id)
@@ -588,9 +598,9 @@ def _compute_dynamic_risk_percent(pos, current_sl: float) -> float:
     """
     Pozitsiyaning INITIAL risk%'ini SL harakatiga qarab qayta hisoblaydi.
 
-    Mantiq: risk% вЂ” SL masofasiga chiziqli bog'liq (lot hajmi o'zgarmagani
+    Mantiq: risk% — SL masofasiga chiziqli bog'liq (lot hajmi o'zgarmagani
     uchun). Agar SL entry narxidan "xavfsiz" tomonga o'tgan bo'lsa (BUY uchun
-    SL >= entry, SELL uchun SL <= entry) вЂ” bu pozitsiya ENDI ZARAR KELTIRA
+    SL >= entry, SELL uchun SL <= entry) — bu pozitsiya ENDI ZARAR KELTIRA
     OLMAYDI, demak uning risk%i 0 bo'lishi kerak (yangi savdolar uchun to'liq
     "joy" bo'shatiladi). Aks holda, joriy SL masofasi boshlang'ich SL
     masofasiga nisbatan qanday ulushni tashkil etsa, risk% ham shunga mos
@@ -623,7 +633,7 @@ def _run_trailing_check_once() -> None:
     if current_price is None:
         _no_price_warning_count += 1
         # Birinchi bir necha marta DEBUG (odatiy, ulanish endigina
-        # boshlanayotgan bo'lishi mumkin), lekin agar bu davom etsa вЂ”
+        # boshlanayotgan bo'lishi mumkin), lekin agar bu davom etsa —
         # bu ANIQ muammo, va uni ko'rinadigan (WARNING) qilish SHART,
         # aks holda trailing "sababsiz" ishlamay qolishi mumkin (buni
         # avvalgi versiyada DEBUG darajasida yashirilgani sababli sezmay
@@ -632,7 +642,7 @@ def _run_trailing_check_once() -> None:
             logger.debug("Hali joriy narx kelmagan (spot subscription kutilmoqda)")
         else:
             logger.warning(
-                "NARX HALI YO'Q вЂ” %s marta ketma-ket! Spot subscription "
+                "NARX HALI YO'Q — %s marta ketma-ket! Spot subscription "
                 "ishlamayotgan bo'lishi mumkin. Ochiq pozitsiyalar TRAILING "
                 "QILINMAYAPTI.",
                 _no_price_warning_count,
@@ -642,10 +652,10 @@ def _run_trailing_check_once() -> None:
     _no_price_warning_count = 0
 
     for pos in trade_manager.get_all_positions():
-        # evaluate() har doim chaqiriladi вЂ” yangi checkpoint o'tilgan bo'lsa
+        # evaluate() har doim chaqiriladi — yangi checkpoint o'tilgan bo'lsa
         # ichki holatni (current_sl/current_tp) yangilaydi va
         # pending_broker_sync=True qo'yadi. Qaytgan `action`ning o'zi endi
-        # faqat LOG uchun (sabab matni) ishlatiladi вЂ” haqiqiy yuborish
+        # faqat LOG uchun (sabab matni) ishlatiladi — haqiqiy yuborish
         # pastdagi pending_broker_sync orqali, xavfsizlik tekshiruvidan
         # o'tgandan keyingina amalga oshiriladi.
         trade_manager.evaluate(pos.position_id, current_price)
@@ -658,11 +668,11 @@ def _run_trailing_check_once() -> None:
         candidate_tp = round(pos.current_tp, digits) if pos.current_tp is not None else None
 
         # XAVFSIZLIK TEKSHIRUVI (MUHIM TUZATISH): broker "TRADING_BAD_STOPS"
-        # xatosini qaytargan holat aniqlangan edi вЂ” high-water mark orqali
+        # xatosini qaytargan holat aniqlangan edi — high-water mark orqali
         # hisoblangan SL/TP ba'zan narx KESKIN teskari tomonga qaytib
         # ketganda, JORIY (instant) narxga nisbatan NOTO'G'RI TOMONDA
         # qolib qolishi mumkin (masalan BUY uchun SL joriy narxdan
-        # YUQORIDA chiqib qolishi). Bunday holda amend YUBORILMAYDI вЂ”
+        # YUQORIDA chiqib qolishi). Bunday holda amend YUBORILMAYDI —
         # pending_broker_sync=True holicha qoladi, keyingi (1 daqiqadan
         # keyingi) siklda narx to'g'rilanganda avtomatik qayta uriniladi.
         sl_ok = True
@@ -681,7 +691,7 @@ def _run_trailing_check_once() -> None:
         if not (sl_ok and tp_ok):
             logger.warning(
                 "Pozitsiya %s: hisoblangan SL=%s TP=%s hali JORIY narxga "
-                "(%.4f, %s) mos emas вЂ” broker'ga YUBORILMADI (xavfsizlik), "
+                "(%.4f, %s) mos emas — broker'ga YUBORILMADI (xavfsizlik), "
                 "keyingi siklda qayta uriniladi.",
                 pos.position_id,
                 candidate_sl,
@@ -693,13 +703,13 @@ def _run_trailing_check_once() -> None:
 
         # MUHIM TUZATISH (xavfsizlik): avval `amend_position_sl_tp`
         # chaqirilgach, DARHOL (broker javobini kutmasdan) muvaffaqiyatli
-        # deb hisoblanardi вЂ” `pending_broker_sync=False` va risk%
-        # yangilanardi. Bu вЂ” `handle_new_signal()`dagi (yangi order
+        # deb hisoblanardi — `pending_broker_sync=False` va risk%
+        # yangilanardi. Bu — `handle_new_signal()`dagi (yangi order
         # ochishdagi) XAVFSIZ naqshga ZID edi, u yerda broker javobi
         # HAQIQATAN HAM kutiladi. Endi bu yerda ham xuddi shunday: broker
         # tasdiqlashini (yoki rad etishini) kutib, FAQAT haqiqiy
         # tasdiqlangandan keyin holat yangilanadi. Agar broker rad etsa
-        # yoki javob kelmasa вЂ” `pending_broker_sync=True` HOLICHA QOLADI,
+        # yoki javob kelmasa — `pending_broker_sync=True` HOLICHA QOLADI,
         # keyingi siklda avtomatik qayta uriniladi (xotiradagi
         # current_sl/current_tp va broker'dagi haqiqiy qiymat orasida
         # nomuvofiqlik yuzaga kelmasligi uchun).
@@ -721,7 +731,7 @@ def _run_trailing_check_once() -> None:
             amend_result["ok"] = False
             amend_result["error"] = str(failure)
             amend_done.set()
-            # `None` qaytaramiz вЂ” Twisted'ga "xato ushlandi, boshqa hech
+            # `None` qaytaramiz — Twisted'ga "xato ushlandi, boshqa hech
             # kim ushlamagani haqida ogohlantirish (Unhandled error in
             # Deferred) kerak emas" deb aytish uchun.
             return None
@@ -731,7 +741,7 @@ def _run_trailing_check_once() -> None:
 
         if not amend_done.wait(timeout=8):
             logger.warning(
-                "Pozitsiya %s: SL/TP amend 8s ichida javob bermadi вЂ” "
+                "Pozitsiya %s: SL/TP amend 8s ichida javob bermadi — "
                 "pending_broker_sync=True saqlanadi, keyingi siklda "
                 "qayta uriniladi.",
                 pos.position_id,
@@ -740,7 +750,7 @@ def _run_trailing_check_once() -> None:
 
         if not amend_result.get("ok"):
             logger.warning(
-                "Pozitsiya %s: SL/TP amend RAD ETILDI/XATO (%s) вЂ” "
+                "Pozitsiya %s: SL/TP amend RAD ETILDI/XATO (%s) — "
                 "pending_broker_sync=True saqlanadi, keyingi siklda "
                 "qayta uriniladi.",
                 pos.position_id,
@@ -773,10 +783,10 @@ app = Flask(__name__)
 # `/candles`, `/price` kabi tez-tez chaqiriladigan, muvaffaqiyatli (2xx)
 # so'rovlar werkzeug'ning avtomatik access-log qatorlarini "to'ldirib"
 # yuboradi, bu esa muhim voqealarni (trailing, xato) log'da topishni
-# qiyinlashtiradi. Bu вЂ” Render'ning Environment Variables bo'limida
+# qiyinlashtiradi. Bu — Render'ning Environment Variables bo'limida
 # `HIDE_SUCCESSFUL_ACCESS_LOGS=true` qo'yib, KOD O'ZGARTIRMASDAN, faqat
 # xizmatni qayta ishga tushirib yoqiladigan/o'chiriladigan sozlama.
-# STANDART HOLAT ("false" yoki sozlanmagan) вЂ” HECH NARSA O'ZGARMAYDI,
+# STANDART HOLAT ("false" yoki sozlanmagan) — HECH NARSA O'ZGARMAYDI,
 # barcha so'rovlar avvalgidek log qilinadi.
 _HIDE_SUCCESS_LOGS = os.environ.get("HIDE_SUCCESSFUL_ACCESS_LOGS", "false").lower() == "true"
 
@@ -805,11 +815,11 @@ if _HIDE_SUCCESS_LOGS:
 def _is_authorized(req) -> bool:
     auth_header = req.headers.get("Authorization", "")
     expected = f"Bearer {WORKER_SECRET_KEY}"
-    # hmac.compare_digest вЂ” timing-attack'lardan himoya qiluvchi taqqoslash
+    # hmac.compare_digest — timing-attack'lardan himoya qiluvchi taqqoslash
     return hmac.compare_digest(auth_header, expected)
 
 
-# /candles va /price endpoint'lari вЂ” alohida market_data.py faylida,
+# /candles va /price endpoint'lari — alohida market_data.py faylida,
 # signal/trailing mantig'idan ajratilgan holda joylashgan. Shu yerda
 # faqat ULANADI (worker.py'ning mavjud obyektlari uzatiladi).
 from market_data import init_market_data  # noqa: E402  (pastda joylashuvi ataylab)
@@ -823,10 +833,10 @@ app.register_blueprint(
     )
 )
 
-# /debug/balance, /debug/positions, /debug/symbol вЂ” botni asosiy oqimga
+# /debug/balance, /debug/positions, /debug/symbol — botni asosiy oqimga
 # ulashdan oldin cTrader'dan kelayotgan ma'lumotni tashqaridan (curl bilan)
 # tekshirish uchun, FAQAT-O'QISH endpoint'lari. market_data bilan bir xil
-# naqshda, mavjud `client` obyektidan foydalanadi вЂ” yangi ulanish yo'q.
+# naqshda, mavjud `client` obyektidan foydalanadi — yangi ulanish yo'q.
 from debug_data import init_debug_data  # noqa: E402  (pastda joylashuvi ataylab)
 
 app.register_blueprint(
@@ -857,7 +867,7 @@ def receive_signal():
 
 @app.route("/health", methods=["GET"])
 def health_check():
-    """Render'ning health-check'i uchun вЂ” autentifikatsiyasiz, maxfiy ma'lumotsiz."""
+    """Render'ning health-check'i uchun — autentifikatsiyasiz, maxfiy ma'lumotsiz."""
     return jsonify(
         {
             "status": "ok" if client.is_ready() else "connecting",
