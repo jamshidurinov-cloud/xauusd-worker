@@ -539,7 +539,15 @@ class CTraderClient:
 
         req = ProtoOATraderReq()
         req.ctidTraderAccountId = self._account_id
-        self._send_and_await(req, _on_trader)
+        # MUHIM TUZATISH (get_trendbars'dagi bilan bir xil naqsh): avval
+        # bu yerda _send_and_await'ning ICHKI standart 5s Deferred
+        # timeout'i ishlatilardi, tashqi `timeout` (10s) esa faqat
+        # `done.wait()`ga tegishli edi. cTrader javobi 5-10s oralig'ida
+        # kelganda, kutubxona o'zi 5s'da Deferred'ni bekor qilib
+        # TimeoutError bilan xato qaytargan, done esa HECH QACHON
+        # set() bo'lmagan - natijada tashqi timeout ham keyin real
+        # xato bilan tugagan. Endi ichki timeout tashqi bilan bir xil.
+        self._send_and_await(req, _on_trader, response_timeout=timeout)
 
         if not done.wait(timeout=timeout):
             raise CTraderError("Balansni olish uchun javob kelmadi (timeout)")
@@ -595,7 +603,12 @@ class CTraderClient:
 
         req = ProtoOAReconcileReq()
         req.ctidTraderAccountId = self._account_id
-        self._send_and_await(req, _on_reconcile)
+        # MUHIM TUZATISH (get_trendbars/get_account_balance'dagi bilan bir
+        # xil naqsh): ichki Deferred timeout endi tashqi `timeout`ga
+        # tenglashtirildi - aks holda cTrader 5-10s oralig'ida javob
+        # berganda so'rov ichki 5s'da bekor qilinib, tashqi timeout
+        # hech qachon muvaffaqiyatga yetmasdi.
+        self._send_and_await(req, _on_reconcile, response_timeout=timeout)
 
         if not done.wait(timeout=timeout):
             raise CTraderError("Reconcile (to'liq) javobi kelmadi (timeout)")
@@ -623,7 +636,12 @@ class CTraderClient:
 
         req = ProtoOAReconcileReq()
         req.ctidTraderAccountId = self._account_id
-        self._send_and_await(req, _on_reconcile)
+        # MUHIM TUZATISH (get_trendbars/get_account_balance'dagi bilan bir
+        # xil naqsh): ichki Deferred timeout endi tashqi `timeout`ga
+        # tenglashtirildi - aks holda cTrader 5-10s oralig'ida javob
+        # berganda so'rov ichki 5s'da bekor qilinib, tashqi timeout
+        # hech qachon muvaffaqiyatga yetmasdi.
+        self._send_and_await(req, _on_reconcile, response_timeout=timeout)
 
         if not done.wait(timeout=timeout):
             raise CTraderError("Reconcile javobi kelmadi (timeout)")
