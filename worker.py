@@ -113,6 +113,16 @@ _latest_prices_lock = threading.Lock()
 _symbol_info: Optional[SymbolInfo] = None
 _price_feed_ever_received = False
 
+# MUHIM (2026-09-15, kunlik risk limiti XATOSI tuzatildi): pozitsiya
+# yopilganda haqiqiy foyda/zarar%ni hisoblash uchun, oxirgi MA'LUM balans.
+# `risk_manager.register_realized_pnl_percent()` AVVAL hech qayerda
+# chaqirilmagan edi - bu, kunlik zarar limiti (`daily_loss_limit_percent`)
+# amalda HECH QACHON ishlamaganini bildirardi (_daily_loss_percent doim
+# 0.0 qolardi). Endi: pozitsiya yopilganda, balansni oldin/keyin solishtirib,
+# haqiqiy foiz hisoblanadi.
+_last_known_balance: Optional[float] = None
+_last_known_balance_lock = threading.Lock()
+
 # /price endpoint uchun — bid VA ask ikkalasi ham kelganda saqlanadi
 # (asosiy trailing mantig'i faqat bid'ga tayanadi, bu alohida, unga
 # ta'sir qilmaydi).
@@ -199,6 +209,33 @@ def _on_execution_event(event) -> None:
                     "kuzatuvdan va risk hisobidan olib tashlandi",
                     pid,
                 )
+
+            # KUNLIK RISK HISOBI (2026-09-15 qo'shildi): balansni oldin/keyin
+            # solishtirib, haqiqiy foyda/zarar%ni hisoblaymiz va
+            # risk_manager'ga yetkazamiz - aks holda kunlik zarar limiti
+            # HECH QACHON ishga tushmas edi.
+            global _last_known_balance
+            with _last_known_balance_lock:
+                prev_balance = _last_known_balance
+                try:
+                    new_balance = client.get_account_balance(timeout=10)
+                except CTraderError as exc:
+                    logger.error(
+                        "Pozitsiya %s yopilgandan keyin balansni olishda xato - "
+                        "kunlik risk hisobi bu safar YANGILANMAYDI: %s", pid, exc,
+                    )
+                    new_balance = None
+
+                if new_balance is not None:
+                    if prev_balance is not None and prev_balance > 0:
+                        pnl_percent = (new_balance - prev_balance) / prev_balance * 100.0
+                        risk_manager.register_realized_pnl_percent(pnl_percent)
+                        logger.info(
+                            "Pozitsiya %s yopilishi bo'yicha balans: %.2f -> %.2f "
+                            "(%.2f%%) - kunlik risk hisobiga qo'shildi",
+                            pid, prev_balance, new_balance, pnl_percent,
+                        )
+                    _last_known_balance = new_balance
     except Exception:  # noqa: BLE001
         logger.exception("Execution event orqali yopiq pozitsiyani aniqlashda xato")
 
@@ -233,6 +270,17 @@ def initialize_ctrader() -> None:
     logger.info("Symbol ma'lumoti tayyor: %s", _symbol_info)
 
     client.subscribe_spots([_symbol_info.symbol_id])
+
+    global _last_known_balance
+    try:
+        _last_known_balance = client.get_account_balance(timeout=10)
+        logger.info("Boshlang'ich balans saqlandi (kunlik risk hisobi uchun): %.2f", _last_known_balance)
+    except CTraderError as exc:
+        logger.error(
+            "Boshlang'ich balansni olishda xato - kunlik risk hisobi bu "
+            "sessiyada ISHLAMASLIGI MUMKIN: %s", exc,
+        )
+
     _recover_orphan_positions()
 
 
