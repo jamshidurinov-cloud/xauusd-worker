@@ -227,14 +227,11 @@ def _on_execution_event(event) -> None:
                     new_balance = None
 
                 if new_balance is not None:
-                    if prev_balance is not None and prev_balance > 0:
-                        pnl_percent = (new_balance - prev_balance) / prev_balance * 100.0
-                        risk_manager.register_realized_pnl_percent(pnl_percent)
-                        logger.info(
-                            "Pozitsiya %s yopilishi bo'yicha balans: %.2f -> %.2f "
-                            "(%.2f%%) - kunlik risk hisobiga qo'shildi",
-                            pid, prev_balance, new_balance, pnl_percent,
-                        )
+                    risk_manager.register_balance_update(new_balance)
+                    logger.info(
+                        "Pozitsiya %s yopilishi bo'yicha balans: %.2f -> %.2f",
+                        pid, prev_balance if prev_balance is not None else new_balance, new_balance,
+                    )
                     _last_known_balance = new_balance
     except Exception:  # noqa: BLE001
         logger.exception("Execution event orqali yopiq pozitsiyani aniqlashda xato")
@@ -274,6 +271,7 @@ def initialize_ctrader() -> None:
     global _last_known_balance
     try:
         _last_known_balance = client.get_account_balance(timeout=10)
+        risk_manager.register_balance_update(_last_known_balance)
         logger.info("Boshlang'ich balans saqlandi (kunlik risk hisobi uchun): %.2f", _last_known_balance)
     except CTraderError as exc:
         logger.error(
