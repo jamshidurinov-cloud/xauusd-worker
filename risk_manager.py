@@ -75,7 +75,15 @@ class RiskManager:
         self.config = config
         self._lock = threading.RLock()
         self._open_positions: dict[str, OpenPositionRisk] = {}
-        self._daily_loss_percent: float = 0.0
+        # 2026-09-17 O'ZGARTIRILDI: avval faqat zararlar yig'ilardi (foyda
+        # hech qachon hisobga olinmasdi) - bu shuni anglatardi: kun net
+        # foydada bo'lsa ham, ketma-ket bir nechta zararli bitim kunlik
+        # limitni "to'ldirib", botni to'xtatib qo'yishi mumkin edi. Endi
+        # KUN BOSHIDAGI balans bilan HOZIRGI balans solishtiriladi (net) -
+        # foyda va zarar bir-birini muvozanatlaydi, xuddi haqiqiy kunlik
+        # drawdown kabi.
+        self._daily_start_balance: Optional[float] = None
+        self._daily_net_percent: float = 0.0
         self._daily_reset_date: _dt.date = _dt.datetime.utcnow().date()
         self._trading_halted_until: Optional[_dt.date] = None
 
@@ -86,34 +94,55 @@ class RiskManager:
         today = _dt.datetime.utcnow().date()
         if today != self._daily_reset_date:
             logger.info(
-                "Kunlik risk holati reset qilinmoqda: %s -> %s (oldingi zarar: %.2f%%)",
+                "Kunlik risk reset: %s -> %s (oldingi net: %.2f%%)",
                 self._daily_reset_date,
                 today,
-                self._daily_loss_percent,
+                self._daily_net_percent,
             )
             self._daily_reset_date = today
-            self._daily_loss_percent = 0.0
+            self._daily_net_percent = 0.0
+            # Kun boshi balansi ham reset qilinadi - keyingi
+            # register_balance_update() chaqiruvi uni yangi kun uchun
+            # qayta o'rnatadi (hozirgi balans = yangi kun boshi balansi).
+            self._daily_start_balance = None
             self._trading_halted_until = None
 
-    def register_realized_pnl_percent(self, pnl_percent: float) -> None:
+    def register_balance_update(self, current_balance: float) -> None:
         """
-        Bir pozitsiya yopilgach, uning natijasini (balansga nisbatan %,
-        zarar bo'lsa manfiy son) kunlik hisobga qo'shadi.
+        Kun boshida (worker ishga tushganda) VA har pozitsiya
+        yopilganidan keyin chaqiriladi. Birinchi chaqiruv - kun boshi
+        balansini o'rnatadi. Keyingi chaqiruvlar - NET (foyda-zarar
+        birga hisoblangan) foizni kun boshi balansiga nisbatan
+        yangilaydi.
         """
         with self._lock:
             self._maybe_reset_daily()
-            if pnl_percent < 0:
-                self._daily_loss_percent += abs(pnl_percent)
+            if self._daily_start_balance is None:
+                self._daily_start_balance = current_balance
+                self._daily_net_percent = 0.0
                 logger.info(
-                    "Kunlik jami zarar yangilandi: %.2f%% (limit: %.2f%%)",
-                    self._daily_loss_percent,
-                    self.config.daily_loss_limit_percent,
+                    "Kunlik boshlang'ich balans o'rnatildi: %.2f", current_balance
                 )
+                return
+            if self._daily_start_balance <= 0:
+                return
+            self._daily_net_percent = (
+                (current_balance - self._daily_start_balance)
+                / self._daily_start_balance
+                * 100.0
+            )
+            logger.info(
+                "Kunlik net holat: %.2f%% (kun boshi=%.2f, hozir=%.2f, limit=-%.2f%%)",
+                self._daily_net_percent,
+                self._daily_start_balance,
+                current_balance,
+                self.config.daily_loss_limit_percent,
+            )
 
     def is_trading_halted(self) -> bool:
         with self._lock:
             self._maybe_reset_daily()
-            return self._daily_loss_percent >= self.config.daily_loss_limit_percent
+            return self._daily_net_percent <= -self.config.daily_loss_limit_percent
 
     # ------------------------------------------------------------------
     # Ochiq pozitsiyalarni kuzatish
