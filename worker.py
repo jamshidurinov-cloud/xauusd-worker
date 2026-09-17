@@ -190,6 +190,58 @@ def _on_ctrader_error(message: str) -> None:
     # etiladi (masalan requests.post orqali Telegram Bot API'ga xabar).
 
 
+def _update_daily_risk_after_close(pid) -> None:
+    """
+    2026-09-17 QO'SHILDI (reactor blocking xatosi tuzatildi): bu funksiya
+    ENDI alohida (background) oqimda ishlaydi, _on_execution_event ICHIDA
+    EMAS. Sabab: _on_execution_event Twisted REACTOR OQIMINING O'ZIDAN
+    chaqiriladi (chunki u on_execution_event callback sifatida ro'yxatdan
+    o'tgan, va bu callback _on_message orqali reactor oqimida ishga
+    tushadi). client.get_account_balance() ICHIDA "done.wait(timeout=10)"
+    - BLOKLOVCHI kutish bor. Bu kutishni reactor oqimining O'ZIDA
+    chaqirish - Twisted'ning eng asosiy qoidasini buzadi: reactor
+    bloklansa, u HECH QANDAY tarmoq javobini (hatto aynan shu
+    kutilayotgan balans javobining o'zini ham!) qabul qila olmaydi.
+    Bu bir vaqtning o'zida BOSHQA so'rovlarni (masalan trendbar) ham
+    "osilib qolishi"ga sabab bo'lgan edi - butun reactor muzlab qolgani
+    uchun. Endi bu ish reactor'dan mustaqil, alohida oqimda bajariladi -
+    ASOSIY ulanishga (ctrader_client.py) HECH NARSA tegilmadi.
+    """
+    global _last_known_balance
+    with _last_known_balance_lock:
+        prev_balance = _last_known_balance
+        new_balance = None
+        last_exc = None
+        for attempt in (1, 2):
+            try:
+                new_balance = client.get_account_balance(timeout=10)
+                break
+            except CTraderError as exc:
+                last_exc = exc
+                if attempt == 1:
+                    logger.warning(
+                        "Pozitsiya %s: balansni olishda 1-urinish "
+                        "muvaffaqiyatsiz (%s) - 3s kutib yana urinamiz",
+                        pid, exc,
+                    )
+                    time.sleep(3)
+
+        if new_balance is None:
+            logger.error(
+                "Pozitsiya %s yopilgandan keyin balansni olishda xato "
+                "(2 urinishdan keyin ham) - kunlik risk hisobi bu "
+                "safar YANGILANMAYDI: %s", pid, last_exc,
+            )
+
+        if new_balance is not None:
+            risk_manager.register_balance_update(new_balance)
+            logger.info(
+                "Pozitsiya %s yopilishi bo'yicha balans: %.2f -> %.2f",
+                pid, prev_balance if prev_balance is not None else new_balance, new_balance,
+            )
+            _last_known_balance = new_balance
+
+
 def _on_execution_event(event) -> None:
     logger.info("Execution event qabul qilindi: %s", event)
     # 1-QATLAM: pozitsiya broker tomonidan yopilganini REAL-VAQTDA aniqlash
@@ -210,51 +262,17 @@ def _on_execution_event(event) -> None:
                     pid,
                 )
 
-            # KUNLIK RISK HISOBI (2026-09-15 qo'shildi): balansni oldin/keyin
-            # solishtirib, haqiqiy foyda/zarar%ni hisoblaymiz va
-            # risk_manager'ga yetkazamiz - aks holda kunlik zarar limiti
-            # HECH QACHON ishga tushmas edi.
-            #
-            # QAYTA URINISH (2026-09-17 qo'shildi): cTrader vaqti-vaqti bilan
-            # 10s ichida ham javob bermaydi (server yuklamasi). Shuning uchun
-            # 1-urinish timeout bo'lsa, 3s kutib FAQAT BIR MARTA yana
-            # urinamiz. Ikkinchisi ham muvaffaqiyatsiz bo'lsa - shu bitim
-            # uchun kunlik risk yangilanmay qoladi (keyingi pozitsiya
-            # yopilganda jarayon yana boshidan boshlanadi), bot ishlashda
-            # davom etadi.
-            global _last_known_balance
-            with _last_known_balance_lock:
-                prev_balance = _last_known_balance
-                new_balance = None
-                last_exc = None
-                for attempt in (1, 2):
-                    try:
-                        new_balance = client.get_account_balance(timeout=10)
-                        break
-                    except CTraderError as exc:
-                        last_exc = exc
-                        if attempt == 1:
-                            logger.warning(
-                                "Pozitsiya %s: balansni olishda 1-urinish "
-                                "muvaffaqiyatsiz (%s) - 3s kutib yana urinamiz",
-                                pid, exc,
-                            )
-                            time.sleep(3)
-
-                if new_balance is None:
-                    logger.error(
-                        "Pozitsiya %s yopilgandan keyin balansni olishda xato "
-                        "(2 urinishdan keyin ham) - kunlik risk hisobi bu "
-                        "safar YANGILANMAYDI: %s", pid, last_exc,
-                    )
-
-                if new_balance is not None:
-                    risk_manager.register_balance_update(new_balance)
-                    logger.info(
-                        "Pozitsiya %s yopilishi bo'yicha balans: %.2f -> %.2f",
-                        pid, prev_balance if prev_balance is not None else new_balance, new_balance,
-                    )
-                    _last_known_balance = new_balance
+            # KUNLIK RISK HISOBI (2026-09-15 qo'shildi, 2026-09-17'da
+            # background threadga ko'chirildi - _update_daily_risk_after_close
+            # docstring'iga qarang). Bu chaqiruv DARHOL qaytadi (bloklamaydi) -
+            # reactor oqimi shu zahoti bo'shab, boshqa xabarlarni qabul
+            # qilishda davom etadi.
+            threading.Thread(
+                target=_update_daily_risk_after_close,
+                args=(pid,),
+                daemon=True,
+                name="daily-risk-balance-check",
+            ).start()
     except Exception:  # noqa: BLE001
         logger.exception("Execution event orqali yopiq pozitsiyani aniqlashda xato")
 
