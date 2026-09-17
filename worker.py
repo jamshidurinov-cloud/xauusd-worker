@@ -214,17 +214,39 @@ def _on_execution_event(event) -> None:
             # solishtirib, haqiqiy foyda/zarar%ni hisoblaymiz va
             # risk_manager'ga yetkazamiz - aks holda kunlik zarar limiti
             # HECH QACHON ishga tushmas edi.
+            #
+            # QAYTA URINISH (2026-09-17 qo'shildi): cTrader vaqti-vaqti bilan
+            # 10s ichida ham javob bermaydi (server yuklamasi). Shuning uchun
+            # 1-urinish timeout bo'lsa, 3s kutib FAQAT BIR MARTA yana
+            # urinamiz. Ikkinchisi ham muvaffaqiyatsiz bo'lsa - shu bitim
+            # uchun kunlik risk yangilanmay qoladi (keyingi pozitsiya
+            # yopilganda jarayon yana boshidan boshlanadi), bot ishlashda
+            # davom etadi.
             global _last_known_balance
             with _last_known_balance_lock:
                 prev_balance = _last_known_balance
-                try:
-                    new_balance = client.get_account_balance(timeout=10)
-                except CTraderError as exc:
+                new_balance = None
+                last_exc = None
+                for attempt in (1, 2):
+                    try:
+                        new_balance = client.get_account_balance(timeout=10)
+                        break
+                    except CTraderError as exc:
+                        last_exc = exc
+                        if attempt == 1:
+                            logger.warning(
+                                "Pozitsiya %s: balansni olishda 1-urinish "
+                                "muvaffaqiyatsiz (%s) - 3s kutib yana urinamiz",
+                                pid, exc,
+                            )
+                            time.sleep(3)
+
+                if new_balance is None:
                     logger.error(
-                        "Pozitsiya %s yopilgandan keyin balansni olishda xato - "
-                        "kunlik risk hisobi bu safar YANGILANMAYDI: %s", pid, exc,
+                        "Pozitsiya %s yopilgandan keyin balansni olishda xato "
+                        "(2 urinishdan keyin ham) - kunlik risk hisobi bu "
+                        "safar YANGILANMAYDI: %s", pid, last_exc,
                     )
-                    new_balance = None
 
                 if new_balance is not None:
                     risk_manager.register_balance_update(new_balance)
