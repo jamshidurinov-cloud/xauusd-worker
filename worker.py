@@ -371,25 +371,17 @@ def _recover_orphan_positions() -> None:
 
         side_enum = TradeSide.BUY if bp["side"] == "BUY" else TradeSide.SELL
 
-        # tp2..tp15 uchun aniq qiymat yo'q — barchasiga joriy TP qo'yamiz.
-        # Bu qiymatlar ishlatilmaydi ham (trailing_enabled=False bo'lgani
-        # uchun evaluate() darhol None qaytaradi), shunchaki dataclass
-        # maydonini to'ldirish uchun.
-        placeholder_tp = current_tp if current_tp is not None else entry_price
-
+        # 2026-09-18: tp2..tp15 maydonlari dataclass'dan OLIB TASHLANDI -
+        # endi trade_manager.py entry_price/initial_sl'dan R-formula bilan
+        # o'zi hisoblaydi. Tiklangan (orphan) pozitsiya uchun bu umuman
+        # muhim emas ham (trailing_enabled=False bo'lgani uchun evaluate()
+        # darhol None qaytaradi).
         managed = ManagedPosition(
             position_id=bp["position_id"],
             event_key=f"recovered-{bp['position_id']}",
             side=side_enum,
             entry_price=entry_price,
             initial_sl=current_sl,
-            tp2=placeholder_tp,
-            tp3=placeholder_tp,
-            tp5=placeholder_tp,
-            tp8=placeholder_tp,
-            tp10=placeholder_tp,
-            tp12=placeholder_tp,
-            tp15=placeholder_tp,
             volume_units=bp["volume_units"],
             risk_percent=0.0,  # pastda dinamik hisoblanadi
             trailing_enabled=False,
@@ -516,9 +508,11 @@ def handle_new_signal(payload: dict) -> dict:
 
     side_enum = TradeSide.BUY if direction == "BUY" else TradeSide.SELL
 
-    # Boshlang'ich broker TP - profilga bog'liq: "smc" -> TP5 (standart),
-    # "ob_fvg" -> TP3 (YANGI, qattiq, hech qachon o'zgarmaydi).
-    initial_broker_tp = tp3 if profile == "ob_fvg" else tp5
+    # 2026-09-18: Boshlang'ich broker TP ENDI BARCHA profillar uchun bir
+    # xil - 5R (avvalgi "ob_fvg -> 3R qattiq" farqi olib tashlandi, Gist
+    # tahlili buning foydaning katta qismini kesib tashlaganini ko'rsatgan
+    # edi). tp5 - main.py'dan kelgan, R-formulaga mos qiymat.
+    initial_broker_tp = tp5
 
     deferred = client.send_market_order(
         symbol_id=_symbol_info.symbol_id,
@@ -585,19 +579,15 @@ def handle_new_signal(payload: dict) -> dict:
             "detail": "Order yuborildi, lekin position_id aniqlanmadi",
         }
 
+    # 2026-09-18: tp2..tp15 maydonlari dataclass'dan OLIB TASHLANDI - endi
+    # trade_manager.py entry_price/initial_sl'dan R-formula bilan o'zi
+    # hisoblaydi (main.py'ning haqiqiy formulasi bilan aniq mos).
     managed = ManagedPosition(
         position_id=position_id,
         event_key=event_key,
         side=side_enum,
         entry_price=entry_price,
         initial_sl=sl_price,
-        tp2=tp2,
-        tp3=tp3,
-        tp5=tp5,
-        tp8=tp8,
-        tp10=tp10,
-        tp12=tp12,
-        tp15=tp15,
         volume_units=volume_units,
         risk_percent=sizing.real_risk_percent,
         profile=profile,
