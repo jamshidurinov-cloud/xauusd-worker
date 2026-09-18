@@ -4,22 +4,37 @@ trade_manager.py
 TP/SL trailing mantiqining "miya" qismi. cTrader bilan bevosita ishlamaydi —
 buning uchun CTraderClient'ga bog'liq (dependency injection orqali).
 
-KELISHILGAN QOIDA (o'zgartirilmasin, botning butun xavfsizligi shunga
-tayanadi):
+KELISHILGAN QOIDA (2026-09-18'da YANGILANDI - har 1R'lik zich zanjirga
+o'tildi, "smc" va "ob_fvg" profillari ENDI BIR XIL ishlaydi):
 
-    Order ochilganda:      broker TP = TP5,  broker SL = boshlang'ich SL
-    Narx TP2 ni o'tsa   -> SL = breakeven                (TP o'zgarmaydi)
-    Narx TP3 ni o'tsa   -> SL = swing,  TP: TP5  -> TP10  (TP5'ga YETMASDAN
-                                                            OLDIN suriladi)
-    Narx TP5 ni o'tsa   -> SL = swing,  TP: TP10 -> TP15
-    Narx TP10 ni o'tsa  -> SL = swing   (TP15 — oxirgi daraja)
-    Narx TP15 ga yetsa  -> broker o'zi to'liq yopadi
+    Order ochilganda:      broker TP = 5R,  broker SL = boshlang'ich SL
+    Narx 2R ni o'tsa    -> SL = breakeven                (TP o'zgarmaydi)
+    Narx nR ni o'tsa (n=3..14) -> SL = (n-2)R,  TP = (n+2)R (15R'dan
+                                    oshmaydi - bu qat'iy yakuniy chegara)
+    Narx 15R ga yetsa   -> broker o'zi to'liq yopadi
 
-Trigger har doim BIR CHECKPOINT OLDIN ishlaydi, shuning uchun broker'dagi
-TP hech qachon "joriy narxga yaqin qotib qolmaydi" — bu spike/sakrash
-holatlarida erta yopilib qolish xavfini kamaytiradi (butunlay yo'q qilmaydi,
-chunki juda keskin harakatlarda broker baribir eski TP'da yopishi mumkin —
-bu qabul qilingan tavakkal, foydasiz emas, faqat submaksimal).
+Barcha TP darajalari (nR) ENDI faqat `entry_price` va `initial_sl`dan
+(ya'ni 1R = |entry - initial_sl|) HISOBLAB CHIQARILADI - main.py'dan alohida
+tp2/tp3/tp5/... qiymatlari sifatida OLINMAYDI. Bu main.py'ning haqiqiy
+formulasi (tp_n = entry +/- n*R) bilan ANIQ mos (2026-09-18'da tasdiqlangan),
+shuning uchun hech qanday nomuvofiqlik xavfi yo'q.
+
+MUHIM (2026-09-18): avval "ob_fvg" profili uchun ALOHIDA, soddalashtirilgan
+(TP qattiq 3R'da qotirilgan) mantiq bor edi. Gist tahlili buning OB/FVG
+foydasining katta qismini (~92%i, taxminan -54R) kesib tashlaganini
+ko'rsatgach, bu farq OLIB TASHLANDI - endi profildan qat'iy nazar, BARCHA
+pozitsiyalar shu yagona, zich (har 1R) zanjir bo'yicha boshqariladi.
+`profile` maydoni faqat MA'LUMOT sifatida saqlanadi (loglash/statistika
+uchun), trailing MANTIG'IGA ENDI TA'SIR QILMAYDI.
+
+Trigger har doim IKKI QADAM OLDIN ishlaydi (masalan nR o'tilganda TP =
+(n+2)R), shuning uchun broker'dagi TP hech qachon "joriy narxga yaqin qotib
+qolmaydi" - bu spike/sakrash holatlarida erta yopilib qolish xavfini
+kamaytiradi (butunlay yo'q qilmaydi, chunki juda keskin harakatlarda broker
+baribir eski TP'da yopishi mumkin - bu qabul qilingan tavakkal, foydasiz
+emas, faqat submaksimal). Zanjir endi ZICH (har butun R) bo'lgani uchun,
+avvalgi notekis oraliqlar (masalan 3R->8R kabi 5R'lik bo'shliq) endi mavjud
+emas - har bir qadam aniq 1R.
 """
 
 from __future__ import annotations
@@ -47,20 +62,14 @@ class ManagedPosition:
     side: TradeSide
     entry_price: float
     initial_sl: float
-    tp2: float
-    tp3: float
-    tp5: float
-    tp8: float
-    tp10: float
-    tp12: float
-    tp15: float
     volume_units: int
     risk_percent: float
 
-    # MUHIM (2026-09-15): "smc" (7-bosqichli, standart) yoki "ob_fvg"
-    # (YANGI, sodda: faqat TP2->breakeven, TP butun vaqt QATTIQ TP3'da
-    # qotirilgan - boshqa hech qanday checkpoint ishlamaydi). Kelajakda
-    # yangi profil qo'shish uchun ham shu yerga kengaytiriladi.
+    # 2026-09-18: ENDI FAQAT MA'LUMOT/STATISTIKA uchun saqlanadi - trailing
+    # mantig'iga (evaluate()) TA'SIR QILMAYDI (barcha profil bir xil, zich
+    # har-1R zanjir bo'yicha boshqariladi). Eski, alohida "ob_fvg" (TP
+    # qattiq 3R'da) mantiq OLIB TASHLANDI - Gist tahlili buni foydaning
+    # katta qismini kesib tashlaganini ko'rsatgan edi.
     profile: str = "smc"
 
     current_sl: float = field(init=False)
@@ -81,30 +90,39 @@ class ManagedPosition:
     pending_broker_sync: bool = False
 
     # Worker qayta ishga tushganda broker'dan "eng yaqin holatda" tiklangan
-    # pozitsiyalar uchun False bo'ladi — chunki asl TP2-TP15 checkpoint'lari
-    # (faqat signal payload'ida bo'lgan, broker'da saqlanmaydigan) yo'qolgan.
+    # pozitsiyalar uchun False bo'ladi — chunki asl checkpoint'lari (faqat
+    # signal payload'ida bo'lgan, broker'da saqlanmaydigan) yo'qolgan.
     # Noto'g'ri taxmin qilib SL'ni xato joyga surishdan ko'ra, bunday
     # pozitsiyalar uchun TP-checkpoint trailing butunlay TO'XTATILADI —
     # faqat kuzatuv (yopilishni aniqlash) va risk-hisob davom etadi.
     trailing_enabled: bool = True
 
-    # Qaysi checkpoint'lar allaqachon "ishga tushirilgan" (idempotentlik
-    # uchun — bir checkpoint ikki marta qayta ishlanmasligi kerak)
-    tp2_triggered: bool = False
-    tp3_triggered: bool = False
-    tp5_triggered: bool = False
-    tp8_triggered: bool = False
-    tp10_triggered: bool = False
-    tp12_triggered: bool = False
+    # 2026-09-18: eski 6 ta alohida "tpN_triggered" bool o'rniga - ENDI
+    # zich (2,3,4,...,14) zanjir bo'lgani uchun, faqat "oxirgi o'tilgan R
+    # darajasi" (butun son) saqlanadi. Bu, xuddi eskisi kabi, bir xil
+    # checkpoint ikki marta ishlanmasligini (idempotentlik) kafolatlaydi.
+    last_triggered_level: int = field(default=0, init=False)
 
     def __post_init__(self):
         self.current_sl = self.initial_sl
-        # Boshlang'ich TP profilga bog'liq: "smc" -> TP5, "ob_fvg" -> TP3
-        # (YANGI, 2026-09-15: OB/FVG uchun TP boshidanoq QATTIQ TP3'da,
-        # hech qachon "oldinga surilmaydi" - faqat TP2'da SL breakeven'ga
-        # ko'tariladi, xolos).
-        self.current_tp = self.tp3 if self.profile == "ob_fvg" else self.tp5
+        # Boshlang'ich TP - ENDI BARCHA profillar uchun 5R (avvalgi
+        # "ob_fvg -> 3R qattiq" farqi 2026-09-18'da olib tashlandi).
+        self.current_tp = self.price_at_r(5)
         self.best_price = self.entry_price  # dastlab, hali hech qayerga bormagan
+
+    def r_distance(self) -> float:
+        """1R = entry va boshlang'ich SL orasidagi masofa (har doim musbat)."""
+        return abs(self.entry_price - self.initial_sl)
+
+    def price_at_r(self, n: float) -> float:
+        """
+        n-R darajasidagi narxni qaytaradi (BUY uchun entry'dan yuqoriga,
+        SELL uchun pastga). n=0 -> entry_price (breakeven) bilan bir xil.
+        """
+        r = self.r_distance()
+        if self.side == TradeSide.BUY:
+            return self.entry_price + n * r
+        return self.entry_price - n * r
 
 
 @dataclass
@@ -185,20 +203,18 @@ class TradeManager:
         o'tilgan bo'lsa, YAKUNIY (eng oxirgi to'g'ri) SL/TP holatini
         qaytaradi. Hech narsa o'zgarmasa None qaytaradi.
 
-        7 BOSQICHLI ZANJIR (tp8/tp12 qo'shilgach kengaytirilgan — TP5-TP10
-        oralig'idagi "katta bo'shliq" muammosini kamaytirish uchun):
-        [tp2, tp3, tp5, tp8, tp10, tp12, tp15]
+        2026-09-18'da YANGILANDI - ZICH, HAR-1R ZANJIR (2R, 3R, 4R, ...,
+        14R), profildan qat'iy nazar bir xil ishlaydi:
 
-        Umumiy qoida (har bir checkpoint uchun, TP2'dan tashqari):
-          SL = ZANJIRDAGI OLDINGI daraja
-          TP = ZANJIRDAGI IKKI QADAM OLDINGA (checkpoint'dan keyingi ikkinchi daraja)
-        TP2 — maxsus holat: faqat SL=entry (breakeven), TP o'zgarmaydi.
-        TP12 — oxiridan oldingi: TP endi o'zgarmaydi (keyingisi — TP15, oxirgi).
+          n=2R:        SL = breakeven (entry),  TP o'zgarmaydi
+          n=3R..14R:   SL = (n-2)R,              TP = (n+2)R (15R'dan
+                                                   oshmaydi - qat'iy chegara)
+          n=15R:       broker o'zi to'liq yopadi (bizning kodimiz aralashmaydi)
 
-        Checkpoint'lar HAR DOIM o'sish tartibida (TP2->TP3->TP5->TP8->TP10->
-        TP12), bitta chaqiruvda barchasi qo'llaniladi — shunda narx bir
-        necha checkpoint'ni birdan o'tib ketsa ham, SL/TP hech qachon
-        mos kelmaydigan (masalan SL=TP) holatga tushmaydi.
+        TP hech qachon ORQAGA (kamroq foydali tomonga) surilmaydi - faqat
+        oldinga (yoki joyida qoladi). Bitta chaqiruvda BARCHA o'tilgan
+        checkpoint'lar ketma-ket qo'llaniladi - shunda narx bir necha
+        checkpoint'ni birdan o'tib ketsa ham, hech biri "ko'rilmay qolmaydi".
         """
         with self._lock:
             pos = self._positions.get(position_id)
@@ -209,6 +225,16 @@ class TradeManager:
             if not pos.trailing_enabled:
                 # Tiklangan (orphan) pozitsiya — checkpoint'lari noma'lum,
                 # shuning uchun trailing amalga oshirilmaydi (xavfsizlik).
+                return None
+
+            r = pos.r_distance()
+            if r <= 0:
+                # Nazariy jihatdan bo'lmasligi kerak (entry==SL), lekin
+                # nolga bo'lishning oldini olish uchun xavfsizlik tekshiruvi.
+                logger.warning(
+                    "Pozitsiya %s: R masofasi 0 yoki manfiy (entry=%s, SL=%s) - "
+                    "trailing o'tkazib yuborildi", position_id, pos.entry_price, pos.initial_sl,
+                )
                 return None
 
             # Xavfsizlik uchun: agar chaqiruvchi update_best_price()ni
@@ -231,85 +257,45 @@ class TradeManager:
             any_triggered = False
             last_reason = ""
 
-            # 1) TP2 — maxsus holat, faqat breakeven
-            if not pos.tp2_triggered and self._price_reached(pos.side, eval_price, pos.tp2):
-                pos.tp2_triggered = True
-                pos.current_sl = pos.entry_price
+            MAX_LEVEL = 14  # 15R - yakuniy, broker o'zi yopadi
+            n = max(2, pos.last_triggered_level + 1)
+
+            while n <= MAX_LEVEL:
+                level_price = pos.price_at_r(n)
+                if not self._price_reached(pos.side, eval_price, level_price):
+                    break  # zanjir o'sish tartibida - keyingisini tekshirish shart emas
+
+                pos.last_triggered_level = n
                 any_triggered = True
-                last_reason = "TP2_REACHED_BREAKEVEN"
-                logger.info(
-                    "Pozitsiya %s: TP2 checkpoint o'tildi. SL -> breakeven (%.4f).",
-                    position_id,
-                    pos.entry_price,
+
+                if n == 2:
+                    pos.current_sl = pos.entry_price  # breakeven
+                    last_reason = "L2_REACHED_BREAKEVEN"
+                    logger.info(
+                        "Pozitsiya %s: 2R checkpoint o'tildi. SL -> breakeven (%.4f).",
+                        position_id, pos.entry_price,
+                    )
+                else:
+                    new_sl = pos.price_at_r(n - 2)
+                    pos.current_sl = new_sl
+                    last_reason = f"L{n}_REACHED"
+                    logger.info(
+                        "Pozitsiya %s: %dR checkpoint o'tildi. SL -> %dR (%.4f).",
+                        position_id, n, n - 2, new_sl,
+                    )
+
+                target_n = min(n + 2, 15)
+                candidate_tp = pos.price_at_r(target_n)
+                # TP faqat OLDINGA (foydaliroq tomonga) suriladi, hech qachon orqaga.
+                is_further = (
+                    candidate_tp > pos.current_tp
+                    if pos.side == TradeSide.BUY
+                    else candidate_tp < pos.current_tp
                 )
+                if is_further:
+                    pos.current_tp = candidate_tp
 
-            # 2-6-bosqichlar FAQAT "smc" profili uchun (7-bosqichli zanjir).
-            # "ob_fvg" profili uchun - TP2'dan boshqa hech qanday checkpoint
-            # ishlamaydi (TP butun vaqt qattiq TP3'da qotirilgan qoladi).
-            if pos.profile == "smc":
-                # 2) TP3 -> SL=TP2, TP=TP8 (ikki qadam oldinga)
-                if not pos.tp3_triggered and self._price_reached(pos.side, eval_price, pos.tp3):
-                    pos.tp3_triggered = True
-                    pos.current_sl = pos.tp2
-                    pos.current_tp = pos.tp8
-                    any_triggered = True
-                    last_reason = "TP3_REACHED_TP_TO_TP8"
-                    logger.info(
-                        "Pozitsiya %s: TP3 checkpoint o'tildi. TP -> TP8, SL -> TP2 (%.4f).",
-                        position_id,
-                        pos.tp2,
-                    )
-
-                # 3) TP5 -> SL=TP3, TP=TP10
-                if not pos.tp5_triggered and self._price_reached(pos.side, eval_price, pos.tp5):
-                    pos.tp5_triggered = True
-                    pos.current_sl = pos.tp3
-                    pos.current_tp = pos.tp10
-                    any_triggered = True
-                    last_reason = "TP5_REACHED_TP_TO_TP10"
-                    logger.info(
-                        "Pozitsiya %s: TP5 checkpoint o'tildi. TP -> TP10, SL -> TP3 (%.4f).",
-                        position_id,
-                        pos.tp3,
-                    )
-
-                # 4) TP8 -> SL=TP5, TP=TP12 (bo'shliqni to'ldiruvchi yangi bosqich)
-                if not pos.tp8_triggered and self._price_reached(pos.side, eval_price, pos.tp8):
-                    pos.tp8_triggered = True
-                    pos.current_sl = pos.tp5
-                    pos.current_tp = pos.tp12
-                    any_triggered = True
-                    last_reason = "TP8_REACHED_TP_TO_TP12"
-                    logger.info(
-                        "Pozitsiya %s: TP8 checkpoint o'tildi. TP -> TP12, SL -> TP5 (%.4f).",
-                        position_id,
-                        pos.tp5,
-                    )
-
-                # 5) TP10 -> SL=TP8, TP=TP15
-                if not pos.tp10_triggered and self._price_reached(pos.side, eval_price, pos.tp10):
-                    pos.tp10_triggered = True
-                    pos.current_sl = pos.tp8
-                    pos.current_tp = pos.tp15
-                    any_triggered = True
-                    last_reason = "TP10_REACHED_TP_TO_TP15"
-                    logger.info(
-                        "Pozitsiya %s: TP10 checkpoint o'tildi. TP -> TP15, SL -> TP8 (%.4f).",
-                        position_id,
-                        pos.tp8,
-                    )
-
-                # 6) TP12 -> SL=TP10 (TP15 — oxirgi, o'zgarmaydi)
-                if not pos.tp12_triggered and self._price_reached(pos.side, eval_price, pos.tp12):
-                    pos.tp12_triggered = True
-                    pos.current_sl = pos.tp10
-                    any_triggered = True
-                    last_reason = "TP12_REACHED_SL_TO_TP10"
-                    logger.info(
-                        "Pozitsiya %s: TP12 checkpoint o'tildi. SL -> TP10 (%.4f).",
-                        position_id,
-                        pos.tp10,
-                    )
+                n += 1
 
             if not any_triggered:
                 return None
